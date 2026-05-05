@@ -1,0 +1,20 @@
+# Claude Code local settings
+.claude/
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Python (browser-print-shim.py is stdlib-only, but keep these for cleanliness)
+__pycache__/
+*.pyc
+*.pyo
+
+# Local config that may contain printer addresses
+printers.json
+
+# Local TLS material if anyone generates it for the shim's --https mode
+*.pem
+*.key

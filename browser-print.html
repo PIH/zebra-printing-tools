@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Browser Print: Direct ZPL vs Helper-converted PDF</title>
+<style>
+  body { font: 14px/1.45 system-ui, sans-serif; max-width: 1200px; margin: 1.2em auto; padding: 0 1em; color: #222; }
+  h1 { font-size: 1.35em; margin-bottom: 0.25em; }
+  h2 { font-size: 1.05em; margin: 0.25em 0 0.5em; }
+  h3 { font-size: 0.92em; margin: 0.5em 0 0.25em; color: #555; }
+  button { font: inherit; padding: 0.5em 1em; cursor: pointer; }
+  button:disabled { opacity: 0.45; cursor: default; }
+  input, select { font: inherit; padding: 0.25em 0.4em; }
+  textarea { font: 11px/1.4 ui-monospace, Menlo, Consolas, monospace; background: #f4f4f4;
+             padding: 0.5em; border: 1px solid #ddd; border-radius: 4px; width: 100%; box-sizing: border-box; }
+  .row { display: flex; gap: 0.6em; align-items: center; flex-wrap: wrap; margin: 0.4em 0; }
+  .pathway { border: 1px solid #ddd; border-radius: 6px; padding: 0.75em 1em; margin: 1em 0; background: #fafafa; }
+  .pathway p { margin: 0.25em 0 0.5em; color: #555; font-size: 0.92em; }
+  .pdf-preview { width: 100%; height: 220px; border: 1px solid #ccc; background: #fff; display: block; }
+  details { margin: 0.5em 0; }
+  details summary { cursor: pointer; color: #555; }
+  #log { font: 12px/1.4 ui-monospace, Menlo, Consolas, monospace;
+         background: #111; color: #eee; padding: 0.6em; border-radius: 4px;
+         height: 11em; overflow: auto; white-space: pre-wrap; }
+  .muted { color: #888; }
+  .ok    { color: #1a7e1a; }
+  .err   { color: #b00020; }
+  .warn  { color: #8a6d00; }
+  code   { background: #eee; padding: 0 0.25em; border-radius: 3px; }
+  .pill  { display: inline-block; padding: 1px 8px; border-radius: 12px; font-size: 0.85em; background: #eee; color: #333; }
+  .pill.ok  { background: #d4edda; color: #155724; }
+  .pill.err { background: #f8d7da; color: #721c24; }
+  .pill.warn{ background: #fff3cd; color: #856404; }
+</style>
+</head>
+<body>
+
+<h1>Browser → Zebra GX430t via Browser Print</h1>
+<p class="muted">
+  Two pathways, side-by-side, same printer / dpi / inputs:
+  <b>(1) Direct ZPL</b> built from primitives,
+  <b>(2) PDF converted to ZPL by the Browser Print helper</b>
+  (Zebra's licensed converter, or the included Linux shim).
+  Built on Zebra's Browser Print SDK 3.1.250 — <code>BrowserPrint</code> for transport,
+  <code>Zebra.Printer</code> for parsed status.
+</p>
+
+<!-- ============================================================ Connection -->
+<section>
+  <h2>Connection</h2>
+  <div class="row">
+    <button id="discover">Refresh printer list</button>
+    <select id="printers" style="min-width: 320px"></select>
+    <span id="apiInfo" class="pill">helper: ?</span>
+    <span id="connStatus" class="muted">Not connected.</span>
+  </div>
+</section>
+
+<!-- ============================================================ Status -->
+<section>
+  <h2>Printer status</h2>
+  <div class="row">
+    <button id="refreshStatus" disabled>Refresh status</button>
+    <span id="statusPill" class="pill">unknown</span>
+    <span id="statusMsg" class="muted"></span>
+  </div>
+</section>
+
+<!-- ============================================================ Controls -->
+<section>
+  <h2>Label content</h2>
+  <div class="row">
+    <label>Resolution:
+      <select id="dpi">
+        <option value="300" selected>300 dpi (GX430t)</option>
+        <option value="203">203 dpi (GX420t / ZD220)</option>
+      </select>
+    </label>
+    <label>Header text: <input id="title" value="OpenMRS Test Label" size="24"></label>
+    <label>Body text: <input id="body" value="ID: A456123" size="20"></label>
+    <label>Barcode: <input id="value" value="A456123" size="14"></label>
+  </div>
+</section>
+
+<!-- ============================================================ PDF (shared) -->
+<section>
+  <h2>Generated PDF (shared by pathways 2 and 3)</h2>
+  <iframe id="pdfPreview" class="pdf-preview" title="PDF preview"></iframe>
+  <div class="row">
+    <button id="downloadPdf">Download PDF</button>
+    <span id="pdfMeta" class="muted"></span>
+  </div>
+</section>
+
+<!-- ============================================================ Pathway 1 -->
+<section class="pathway">
+  <h2>1. Direct ZPL</h2>
+  <p>
+    Text via <code>^A0N</code>, barcode via <code>^BC</code>. Vector primitives rendered by
+    the printer firmware — sharpest result, smallest payload (~340 bytes).
+  </p>
+  <details>
+    <summary>Generated ZPL (<span id="zplDirectSize">0</span> chars)</summary>
+    <textarea id="zplDirect" rows="9" readonly></textarea>
+  </details>
+  <div class="row" style="margin-top: 0.5em">
+    <button id="printDirect" disabled>Print direct ZPL →</button>
+  </div>
+</section>
+
+<!-- ============================================================ Pathway 2 -->
+<section class="pathway">
+  <h2>2. PDF → ZPL — converted by the Browser Print helper <span class="pill warn">needs Zebra PDF feature key (or the bundled shim)</span></h2>
+  <p>
+    Calls <code>Zebra.Printer.getConvertedResource(pdfBlob, {toFormat:'zpl', featureKey})</code>,
+    which asks the local helper to convert the PDF to printer-language using Zebra's own
+    halftoning / dithering. Without a valid feature key the official helper rejects the
+    request; the included <code>browser-print-shim.py</code> ignores the key and converts
+    via Ghostscript + Floyd-Steinberg + ZPL <code>^GF</code> compression.
+  </p>
+  <div class="row">
+    <label>PDF feature key:
+      <input id="featureKey" type="password" size="40"
+             placeholder="paste Zebra PDF conversion license key">
+    </label>
+    <label><input id="rememberKey" type="checkbox"> remember in localStorage</label>
+  </div>
+  <details>
+    <summary>Generated ZPL (<span id="zplHelperSize">0</span> chars)</summary>
+    <textarea id="zplHelper" rows="9" readonly placeholder="Click 'Convert via helper' to populate"></textarea>
+  </details>
+  <div class="row" style="margin-top: 0.5em">
+    <button id="convertHelper" disabled>Convert via helper</button>
+    <button id="printHelper" disabled>Print helper-converted ZPL →</button>
+    <span id="helperStatus" class="muted"></span>
+  </div>
+</section>
+
+<h3>Log</h3>
+<pre id="log"></pre>
+
+<!-- ============================================================ Libraries -->
+<script src="zebra-browser-print-js-v31250/BrowserPrint-3.1.250.min.js"></script>
+<script src="zebra-browser-print-js-v31250/BrowserPrint-Zebra-1.1.250.min.js"></script>
+<script src="pdf-lib.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"></script>
+
+<script>
+'use strict';
+
+// =============================================================================
+// Tiny helpers
+// =============================================================================
+const $ = (id) => document.getElementById(id);
+function log(msg, cls) {
+  const el = $('log');
+  const span = document.createElement('span');
+  if (cls) span.className = cls;
+  span.textContent = `[${new Date().toLocaleTimeString()}] ${msg}\n`;
+  el.appendChild(span);
+  el.scrollTop = 1e9;
+}
+const setText = (id, t, cls) => { const e = $(id); e.textContent = t; if (cls !== undefined) e.className = cls; };
+
+// SDK is callback-based for BrowserPrint.* and device.* — wrap to promises.
+const promisify = (fn) => (...args) =>
+  new Promise((resolve, reject) => fn(...args, resolve, reject));
+
+const bpGetDefaultDevice = (type) =>
+  new Promise((res, rej) => BrowserPrint.getDefaultDevice(type, res, rej));
+const bpGetLocalDevices = (type) =>
+  new Promise((res, rej) => BrowserPrint.getLocalDevices(res, rej, type));
+const bpGetAppConfig = () =>
+  new Promise((res, rej) => BrowserPrint.getApplicationConfiguration(res, rej));
+const devSend = (dev, data) =>
+  new Promise((res, rej) => dev.send(data, res, rej));
+// Note: Zebra.Printer.* methods natively return Promises when called without callbacks.
+
+// =============================================================================
+// State
+// =============================================================================
+let device = null;          // BrowserPrint.Device
+let zebra  = null;          // Zebra.Printer wrapper
+let allDevices = [];
+let lastPdfBytes = null;    // Uint8Array — PDF for pathways 2 and 3
+let lastPdfUrl   = null;    // Object URL for the iframe
+
+// =============================================================================
+// Connection: BrowserPrint.getDefaultDevice + getLocalDevices
+// =============================================================================
+async function refreshHelperInfo() {
+  try {
+    const cfg = await bpGetAppConfig();
+    const apiLevel = cfg.api_level ?? '?';
+    const platform = cfg.platform ?? '?';
+    setText('apiInfo', `helper: ${platform}, API L${apiLevel}`, 'pill ok');
+    log(`Browser Print: platform=${platform}, api_level=${apiLevel}, ` +
+        `supportedConversions=${JSON.stringify(cfg.supportedConversions)}`);
+  } catch (e) {
+    setText('apiInfo', 'helper: unreachable', 'pill err');
+    log('getApplicationConfiguration failed: ' + e, 'err');
+    throw e;
+  }
+}
+
+async function discover() {
+  try {
+    await refreshHelperInfo();
+  } catch {
+    setText('connStatus', 'Browser Print helper not reachable.', 'err');
+    return;
+  }
+
+  let defaultDev = null;
+  try { defaultDev = await bpGetDefaultDevice('printer'); }
+  catch (e) { log('getDefaultDevice: ' + e, 'warn'); }
+
+  let list = [];
+  try { list = await bpGetLocalDevices('printer'); }
+  catch (e) { log('getLocalDevices: ' + e, 'warn'); }
+
+  allDevices = list.slice();
+  if (defaultDev && !allDevices.some(d => d.uid === defaultDev.uid)) {
+    allDevices.unshift(defaultDev);
+  }
+
+  const sel = $('printers');
+  sel.innerHTML = '';
+  allDevices.forEach((d, i) => {
+    const o = document.createElement('option');
+    o.value = String(i);
+    o.textContent = `${d.name} [${d.connection}]${defaultDev && d.uid === defaultDev.uid ? ' ★ default' : ''}`;
+    sel.appendChild(o);
+  });
+
+  if (allDevices.length) {
+    selectDevice(allDevices[0]);
+    setText('connStatus', `Found ${allDevices.length} printer(s).`, 'ok');
+  } else {
+    selectDevice(null);
+    setText('connStatus', 'No printers reported by Browser Print.', 'warn');
+  }
+}
+
+function selectDevice(d) {
+  device = d;
+  zebra = d ? new Zebra.Printer(d) : null;
+  const enabled = !!device;
+  $('printDirect').disabled  = !enabled;
+  $('refreshStatus').disabled = !enabled;
+  $('convertHelper').disabled = !enabled;
+  // Pathway-2 print button is re-evaluated after each successful conversion.
+  if (d) refreshStatus();
+}
+
+$('printers').addEventListener('change', (e) => {
+  const idx = parseInt(e.target.value, 10);
+  selectDevice(allDevices[idx]);
+});
+$('discover').addEventListener('click', discover);
+
+// =============================================================================
+// Printer status — Zebra.Printer.getStatus()
+// =============================================================================
+async function refreshStatus() {
+  if (!zebra) return;
+  setText('statusPill', 'querying…', 'pill');
+  try {
+    const st = await zebra.getStatus();
+    const ready = st.isPrinterReady();
+    const msg = (typeof st.getMessage === 'function') ? st.getMessage() : '';
+    setText('statusPill', ready ? 'READY' : 'NOT READY', 'pill ' + (ready ? 'ok' : 'err'));
+    setText('statusMsg', msg);
+    log(`Status: ready=${ready} — ${msg}`, ready ? 'ok' : 'warn');
+  } catch (e) {
+    setText('statusPill', 'error', 'pill err');
+    setText('statusMsg', String(e));
+    log('getStatus failed: ' + e, 'err');
+  }
+}
+$('refreshStatus').addEventListener('click', refreshStatus);
+
+// =============================================================================
+// Pathway 1: Direct ZPL
+// =============================================================================
+// Layout intentionally mirrors what `buildPdf()` produces (same margins, font
+// heights, and bottom-anchored barcode), so labels from pathway 1 end up the
+// same physical size as labels from pathways 2 & 3 — apples to apples.
+//
+// Reference numbers (300 dpi):
+//   margin   50 dots   ≈ 12 PDF points
+//   header   58 dots   ≈ 14 pt Helvetica Bold     (PDF: drawText size 14)
+//   body     46 dots   ≈ 11 pt Helvetica          (PDF: drawText size 11)
+//   barcode  ~200-dot bars + ~40-dot HRI line, ~840 dots wide (^BY module 6)
+//                                                  (PDF: 192 pt × ~55 pt)
+function buildDirectZpl({ title, body, value, dpi }) {
+  const pw = 3 * dpi, ll = 2 * dpi;
+  const scale = dpi / 300;
+
+  const margin   = Math.round(50 * scale);
+  const headerH  = Math.round(58 * scale);
+  const bodyGap  = Math.round(22 * scale);   // gap between header and body
+  const bodyH    = Math.round(46 * scale);
+  const bcModule = Math.max(2, Math.round(6 * scale));   // module width in dots
+  const bcHeight = Math.round(200 * scale);  // bar height (HRI text is extra below)
+  const bcHriH   = Math.round(40 * scale);   // approx height of HRI text line
+
+  // Anchor the barcode to the bottom, leaving `margin` of clear space below.
+  const bcY = ll - margin - bcHriH - bcHeight;
+
+  return [
+    '^XA',
+    '^CI28',                                 // UTF-8
+    `^PW${pw}`,
+    `^LL${ll}`,
+    '^LH0,0',
+    `^FO${margin},${margin}^A0N,${headerH},${headerH}^FD${title}^FS`,
+    `^FO${margin},${margin + headerH + bodyGap}^A0N,${bodyH},${bodyH}^FD${body}^FS`,
+    `^BY${bcModule},2,${bcHeight}`,
+    `^FO${margin},${bcY}^BCN,${bcHeight},Y,N,N^FD${value}^FS`,
+    '^XZ',
+  ].join('\n');
+}
+function regenerateDirect() {
+  const zpl = buildDirectZpl({
+    title: $('title').value, body: $('body').value, value: $('value').value,
+    dpi:   parseInt($('dpi').value, 10),
+  });
+  $('zplDirect').value = zpl;
+  setText('zplDirectSize', zpl.length.toLocaleString());
+}
+
+// =============================================================================
+// Shared PDF generation (used by pathways 2 and 3)
+// =============================================================================
+async function buildPdf({ title, body, value }) {
+  const { PDFDocument, StandardFonts } = PDFLib;
+  const doc = await PDFDocument.create();
+  const W = 3 * 72, H = 2 * 72;
+  const page = doc.addPage([W, H]);
+  const fontReg  = await doc.embedFont(StandardFonts.Helvetica);
+  const fontBold = await doc.embedFont(StandardFonts.HelveticaBold);
+
+  const margin = 12;
+  page.drawText(title, { x: margin, y: H - margin - 14, size: 14, font: fontBold });
+  page.drawText(body,  { x: margin, y: H - margin - 14 - 18, size: 11, font: fontReg });
+
+  const bc = document.createElement('canvas');
+  JsBarcode(bc, value, {
+    format: 'CODE128', displayValue: true, fontSize: 14,
+    height: 60, width: 2, margin: 0,
+    background: '#ffffff', lineColor: '#000000',
+  });
+  const blob = await new Promise(r => bc.toBlob(r, 'image/png'));
+  const png  = await doc.embedPng(await blob.arrayBuffer());
+  const bcAvail = W - 2 * margin;
+  const bcAspect = bc.height / bc.width;
+  page.drawImage(png, { x: margin, y: margin, width: bcAvail, height: bcAvail * bcAspect });
+
+  return doc.save();   // Uint8Array
+}
+
+async function regeneratePdf() {
+  try {
+    lastPdfBytes = await buildPdf({
+      title: $('title').value, body: $('body').value, value: $('value').value,
+    });
+    if (lastPdfUrl) URL.revokeObjectURL(lastPdfUrl);
+    lastPdfUrl = URL.createObjectURL(new Blob([lastPdfBytes], { type: 'application/pdf' }));
+    $('pdfPreview').src = lastPdfUrl;
+    setText('pdfMeta', `${lastPdfBytes.byteLength.toLocaleString()} bytes`);
+  } catch (e) {
+    log('PDF build error: ' + e.message, 'err');
+  }
+}
+
+// =============================================================================
+// Pathway 2: PDF → ZPL via Browser Print helper conversion
+// =============================================================================
+async function convertViaHelper() {
+  if (!zebra) { log('No printer selected.', 'err'); return; }
+  if (!lastPdfBytes) await regeneratePdf();
+  const featureKey = $('featureKey').value.trim();
+  if ($('rememberKey').checked) localStorage.setItem('zebraFeatureKey', featureKey);
+
+  setText('helperStatus', 'Converting via helper…');
+  try {
+    const blob = new Blob([lastPdfBytes], { type: 'application/pdf' });
+    const t0 = performance.now();
+    const zpl = await zebra.getConvertedResource(blob, {
+      toFormat: 'zpl',
+      fromFormat: 'pdf',
+      ...(featureKey ? { featureKey } : {}),
+    });
+    const dt = (performance.now() - t0).toFixed(0);
+
+    $('zplHelper').value = zpl;
+    setText('zplHelperSize', zpl.length.toLocaleString());
+    setText('helperStatus', `${zpl.length.toLocaleString()} chars ZPL, ${dt} ms`, 'ok');
+    $('printHelper').disabled = !device;
+  } catch (e) {
+    const msg = (e && e.message) || String(e);
+    setText('helperStatus', 'Error: ' + msg, 'err');
+    log('helper conversion: ' + msg + (msg.toLowerCase().includes('license') || msg.toLowerCase().includes('key')
+        ? '  ← typically means the PDF feature key is missing or invalid' : ''), 'err');
+  }
+}
+
+// =============================================================================
+// Print actions — both pathways go through device.send + a status check
+// =============================================================================
+async function printZpl(zpl, label) {
+  if (!device) { log('No printer.', 'err'); return; }
+  if (!zpl)    { log('Nothing to print for ' + label, 'warn'); return; }
+  try {
+    const t0 = performance.now();
+    await devSend(device, zpl);
+    const dt = (performance.now() - t0).toFixed(0);
+    log(`${label}: sent ${zpl.length.toLocaleString()} bytes in ${dt} ms`, 'ok');
+    // Status read after print (small delay so the printer has had a moment).
+    setTimeout(refreshStatus, 350);
+  } catch (e) {
+    log(`${label} failed: ` + (e.message || e), 'err');
+    setTimeout(refreshStatus, 350);
+  }
+}
+
+$('printDirect').addEventListener('click', () => printZpl($('zplDirect').value, 'Direct ZPL'));
+$('printHelper').addEventListener('click', () => printZpl($('zplHelper').value, 'PDF→helper→ZPL'));
+$('convertHelper').addEventListener('click', convertViaHelper);
+$('downloadPdf').addEventListener('click', () => {
+  if (!lastPdfBytes) return;
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([lastPdfBytes], { type: 'application/pdf' }));
+  a.download = 'label.pdf';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+});
+
+// =============================================================================
+// Wire up controls — regenerate everything on input change
+// =============================================================================
+async function regenAll() {
+  regenerateDirect();
+  await regeneratePdf();
+  // Pathway-2 textarea becomes stale on input change; clear so the user has to
+  // re-convert (the helper call is heavier than direct ZPL — don't auto-trigger).
+  $('zplHelper').value = '';
+  setText('zplHelperSize', '0');
+  $('printHelper').disabled = true;
+}
+['title', 'body', 'value', 'dpi'].forEach(id => {
+  const el = $(id);
+  el.addEventListener('input', regenAll);
+  el.addEventListener('change', regenAll);
+});
+
+// =============================================================================
+// PDF feature key default — pre-populated for convenience.
+//
+// This is the *public demo key* that Zebra hands out for prototyping PDF
+// conversion via Browser Print. It is hardcoded in plaintext on Zebra's own
+// public test harness and Zebra's developer forum directs developers to
+// extract it from there:
+//   https://cagdemo.com/BrowserPrint/test/external/zebra_test.html
+//   https://developer.zebra.com/forum/25874
+// So committing it here is the same posture Zebra itself takes.
+//
+// Caveats:
+//   - Zebra could rotate or revoke this key at any time.
+//   - For production rollouts, obtain a per-machine key from Zebra OR
+//     skip conversion entirely via PDF Direct (see README §4 — no key
+//     needed if the printer firmware has PDF Direct enabled).
+//   - Per-user override always wins via the input field + localStorage.
+// =============================================================================
+const DEFAULT_FEATURE_KEY =
+  'AbsQM…';
+
+// Persist feature key
+{
+  const saved = localStorage.getItem('zebraFeatureKey');
+  if (saved !== null) {
+    $('featureKey').value = saved;
+    $('rememberKey').checked = true;
+  } else if (DEFAULT_FEATURE_KEY) {
+    $('featureKey').value = DEFAULT_FEATURE_KEY;
+    // Don't auto-check "remember" — leave that to the user.
+  }
+  $('featureKey').addEventListener('change', () => {
+    if ($('rememberKey').checked) localStorage.setItem('zebraFeatureKey', $('featureKey').value.trim());
+  });
+  $('rememberKey').addEventListener('change', () => {
+    if (!$('rememberKey').checked) localStorage.removeItem('zebraFeatureKey');
+    else localStorage.setItem('zebraFeatureKey', $('featureKey').value.trim());
+  });
+}
+
+// =============================================================================
+// Boot
+// =============================================================================
+(async function init() {
+  regenerateDirect();
+  await regeneratePdf();
+  await discover();
+})();
+</script>
+
+</body>
+</html>
