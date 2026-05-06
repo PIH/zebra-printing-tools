@@ -498,6 +498,51 @@ def _gs_version_str():
         return '?'
 
 
+_PW_RE = re.compile(rb'\^PW\s*(\d+)')
+_LL_RE = re.compile(rb'\^LL\s*(\d+)')
+
+
+def _parse_label_size_pts(zpl_bytes, dpi):
+    """Extract physical label dimensions from a ZPL document and convert to
+    points (1/72 in). Returns (width_pts, height_pts) or None if either
+    ^PW or ^LL is missing.
+
+    zpl2pdf's offline renderer produces PDFs with MediaBox in dots-at-the-dpi
+    (a known upstream bug); we use these dimensions to rescale.
+    """
+    pw = _PW_RE.search(zpl_bytes)
+    ll = _LL_RE.search(zpl_bytes)
+    if not pw or not ll:
+        return None
+    pw_dots = int(pw.group(1))
+    ll_dots = int(ll.group(1))
+    return (pw_dots * 72.0 / dpi, ll_dots * 72.0 / dpi)
+
+
+def _rescale_pdf_via_gs(pdf_bytes, width_pts, height_pts):
+    """Rescale a PDF to the given media size using Ghostscript's
+    -dDEVICEWIDTHPOINTS/-dDEVICEHEIGHTPOINTS + -dPDFFitPage. Used to work
+    around the zpl2pdf offline-renderer page-size bug.
+
+    Returns (output_pdf_bytes, stderr_text). Raises subprocess.SubprocessError
+    on gs failure.
+    """
+    proc = subprocess.run(
+        [
+            'gs', '-dQUIET', '-dBATCH', '-dNOPAUSE',
+            '-sDEVICE=pdfwrite', '-sOutputFile=-',
+            f'-dDEVICEWIDTHPOINTS={width_pts:.3f}',
+            f'-dDEVICEHEIGHTPOINTS={height_pts:.3f}',
+            '-dFIXEDMEDIA', '-dPDFFitPage', '-',
+        ],
+        input=pdf_bytes, capture_output=True, timeout=15,
+    )
+    if proc.returncode != 0:
+        stderr = proc.stderr.decode('utf-8', errors='replace')[:2048]
+        raise subprocess.SubprocessError(f'gs rescale failed: {stderr}')
+    return proc.stdout, proc.stderr.decode('utf-8', errors='replace')
+
+
 def _render_pdf_to_pgm(pdf_bytes, dpi):
     """Render page 1 of a PDF to PGM (8-bit grayscale). Returns (w, h, pixels).
     pixels: bytes of length w*h, 0=black, 255=white."""
@@ -1008,9 +1053,27 @@ class Handler(BaseHTTPRequestHandler):
                        proc.stdout.decode('utf-8', errors='replace'))[:2048]
                 log.warning('zpl2pdf produced non-PDF output: %s', msg.strip())
                 return self._send(400, msg or 'zpl2pdf produced empty/non-PDF output')
+
+            # Workaround for the zpl2pdf offline-renderer page-size bug:
+            # MediaBox comes out in dots-at-the-dpi instead of points
+            # (1 pt = 1/72 in). When we have ^PW/^LL in the ZPL and
+            # Ghostscript on PATH, rescale to the correct physical media.
+            pdf_bytes = proc.stdout
+            label_pts = _parse_label_size_pts(zpl_bytes, dpi)
+            if label_pts is not None and _have_ghostscript():
+                try:
+                    pdf_bytes, gs_stderr = _rescale_pdf_via_gs(
+                        pdf_bytes, label_pts[0], label_pts[1])
+                    if gs_stderr.strip():
+                        # gs emits a harmless "incorrect data check" warning
+                        # on most zpl2pdf outputs; demote to debug level so
+                        # it doesn't pollute INFO logs.
+                        log.debug('gs rescale stderr: %s', gs_stderr.strip())
+                except subprocess.SubprocessError as e:
+                    log.warning('gs rescale failed; returning unscaled PDF: %s', e)
             log.info('zpl-to-pdf: %d bytes ZPL @ %d dpi → %d bytes PDF in %.0f ms',
-                     len(zpl_bytes), dpi, len(proc.stdout), dt_ms)
-            return self._send(200, proc.stdout, 'application/pdf')
+                     len(zpl_bytes), dpi, len(pdf_bytes), dt_ms)
+            return self._send(200, pdf_bytes, 'application/pdf')
         except subprocess.TimeoutExpired:
             return self._send(500, 'zpl2pdf timed out (>30 s)')
         except Exception as e:
