@@ -78,6 +78,7 @@ import socket
 import ssl
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -806,6 +807,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/write':        return self.handle_write()
         if path == '/read':         return self.handle_read()
         if path == '/convert':      return self.handle_convert()
+        if path == '/zpl-to-pdf':   return self.handle_zpl_to_pdf()
         return self._send(404, 'Not found')
 
     # ---- handlers ----
@@ -953,6 +955,72 @@ class Handler(BaseHTTPRequestHandler):
         # SDK does JSON.parse(responseText) and resolves the promise with the
         # result, so a JSON-encoded string is what user code receives back.
         return self._send_json(200, zpl)
+
+    def handle_zpl_to_pdf(self):
+        """POST /zpl-to-pdf
+        Body: raw ZPL bytes (Content-Type: text/plain).
+        Query: ?dpi=<int> — print density in dots per inch (default 203).
+        Response: 200 application/pdf with the rendered PDF bytes.
+                  503 text/plain if zpl2pdf isn't installed.
+                  4xx text/plain with stderr if conversion fails.
+        Shells out to the bundled binary; ZPL goes via a temp file (not -z
+        argv) because ^GFA blocks at 600 dpi can blow past Windows' 32 KB
+        argv limit.
+        """
+        binpath = _zpl2pdf_path()
+        if binpath is None:
+            return self._send(503,
+                'zpl2pdf not installed; run ./install-zpl2pdf.sh '
+                'to enable the ZPL → PDF preview endpoint.')
+
+        zpl_bytes = self._read_body()
+        if not zpl_bytes:
+            return self._send(400, 'Empty body; expected raw ZPL.')
+
+        try:
+            dpi = int((parse_qs(urlparse(self.path).query).get('dpi') or ['203'])[0])
+        except ValueError:
+            return self._send(400, "Bad 'dpi' query param; expected an integer.")
+
+        # Temp file rather than -z argv (Windows argv is capped at 32 KB).
+        # delete=False because Windows can't reopen an open NamedTemporaryFile.
+        tmp = tempfile.NamedTemporaryFile(prefix='zpl-', suffix='.zpl', delete=False)
+        try:
+            tmp.write(zpl_bytes)
+            tmp.flush()
+            tmp.close()
+            t0 = time.monotonic()
+            proc = subprocess.run(
+                [binpath, '-i', tmp.name, '--stdout', '-d', str(dpi)],
+                capture_output=True, timeout=30,
+            )
+            dt_ms = (time.monotonic() - t0) * 1000.0
+            if proc.returncode != 0:
+                stderr = proc.stderr.decode('utf-8', errors='replace')[:2048]
+                log.warning('zpl2pdf failed (rc=%d): %s', proc.returncode, stderr.strip())
+                return self._send(400, stderr or f'zpl2pdf exited with code {proc.returncode}')
+            if not proc.stdout.startswith(b'%PDF-'):
+                # zpl2pdf can return exit code 0 with stdout text like
+                # "No images generated from ZPL content!" on some malformed
+                # inputs. Translate that to a 4xx so the page can show
+                # a real error message instead of garbled "PDF" content.
+                msg = (proc.stderr.decode('utf-8', errors='replace') or
+                       proc.stdout.decode('utf-8', errors='replace'))[:2048]
+                log.warning('zpl2pdf produced non-PDF output: %s', msg.strip())
+                return self._send(400, msg or 'zpl2pdf produced empty/non-PDF output')
+            log.info('zpl-to-pdf: %d bytes ZPL @ %d dpi → %d bytes PDF in %.0f ms',
+                     len(zpl_bytes), dpi, len(proc.stdout), dt_ms)
+            return self._send(200, proc.stdout, 'application/pdf')
+        except subprocess.TimeoutExpired:
+            return self._send(500, 'zpl2pdf timed out (>30 s)')
+        except Exception as e:
+            log.exception('zpl-to-pdf failed')
+            return self._send(500, f'zpl-to-pdf failed: {e}')
+        finally:
+            try:
+                os.unlink(tmp.name)
+            except OSError:
+                pass
 
 
 # -----------------------------------------------------------------------------
