@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Browser Print: Direct ZPL vs Helper-converted PDF</title>
+<title>Zebra Browser Print — Direct ZPL vs Helper-converted PDF</title>
 <style>
   body { font: 14px/1.45 system-ui, sans-serif; max-width: 1200px; margin: 1.2em auto; padding: 0 1em; color: #222; }
   h1 { font-size: 1.35em; margin-bottom: 0.25em; }
@@ -35,14 +35,16 @@
 </head>
 <body>
 
-<h1>Browser → Zebra GX430t via Browser Print</h1>
+<h1>Browser → Zebra printer via Browser Print</h1>
 <p class="muted">
   Two pathways, side-by-side, same printer / dpi / inputs:
   <b>(1) Direct ZPL</b> built from primitives,
   <b>(2) PDF converted to ZPL by the Browser Print helper</b>
   (Zebra's licensed converter, or the included Linux shim).
   Built on Zebra's Browser Print SDK 3.1.250 — <code>BrowserPrint</code> for transport,
-  <code>Zebra.Printer</code> for parsed status.
+  <code>Zebra.Printer</code> for parsed status. Resolution and label dimensions
+  auto-detect from the selected printer; override any field to print at a
+  different size.
 </p>
 
 <!-- ============================================================ Connection -->
@@ -68,14 +70,30 @@
 
 <!-- ============================================================ Controls -->
 <section>
-  <h2>Label content</h2>
+  <h2>Label geometry</h2>
   <div class="row">
     <label>Resolution:
-      <select id="dpi">
-        <option value="300" selected>300 dpi (GX430t)</option>
-        <option value="203">203 dpi (GX420t / ZD220)</option>
-      </select>
+      <input id="dpi" type="number" min="100" max="600" step="1" value="300"
+             list="dpi-options" style="width: 4.5em"> dpi
     </label>
+    <datalist id="dpi-options">
+      <option value="152"></option>
+      <option value="203"></option>
+      <option value="300"></option>
+      <option value="600"></option>
+    </datalist>
+    <label>Width:
+      <input id="labelW" type="number" min="0.25" max="12" step="0.05" value="3.00"
+             style="width: 4.5em"> in
+    </label>
+    <label>Height:
+      <input id="labelH" type="number" min="0.25" max="24" step="0.05" value="2.00"
+             style="width: 4.5em"> in
+    </label>
+    <span id="detectHint" class="muted" style="font-size: 0.9em"></span>
+  </div>
+  <h2>Label content</h2>
+  <div class="row">
     <label>Header text: <input id="title" value="OpenMRS Test Label" size="24"></label>
     <label>Body text: <input id="body" value="ID: A456123" size="20"></label>
     <label>Barcode: <input id="value" value="A456123" size="14"></label>
@@ -250,8 +268,16 @@ function selectDevice(d) {
   $('refreshStatus').disabled = !enabled;
   $('convertHelper').disabled = !enabled;
   // Pathway-2 print button is re-evaluated after each successful conversion.
-  if (d) refreshStatus();
-  else { setText('statusPill', '—', 'pill'); setText('statusMsg', '', 'muted'); }
+  if (d) {
+    refreshStatus();
+    // Fire alongside refreshStatus — the SDK serialises device requests
+    // internally (single queue per Printer), so they don't actually race
+    // each other on the wire.
+    detectPrinterCapabilities();
+  } else {
+    setText('statusPill', '—', 'pill'); setText('statusMsg', '', 'muted');
+    setText('detectHint', '', 'muted');
+  }
 }
 
 $('printers').addEventListener('change', (e) => {
@@ -329,6 +355,198 @@ async function refreshStatus() {
 $('refreshStatus').addEventListener('click', refreshStatus);
 
 // =============================================================================
+// Printer capability detection — head dpi + currently-configured label size
+// =============================================================================
+// Reads `head.resolution.in_dpi` via SGD and parses `^XA^HH^XZ` config for
+// PRINT WIDTH / LABEL LENGTH (both in dots). Pre-fills the geometry inputs
+// so the prototype works on any Zebra ZPL printer the helper can see, not
+// just whichever model the developer happened to have on the desk. The
+// user can override any input — manual edits are sticky and won't be
+// stomped by a re-detection.
+//
+// SGD response format from the printer: `"203"\r\n` (quoted value + CRLF).
+// Configuration response: STX/ETX-framed multi-line block with fixed-width
+// rows; the SDK already parses it into `printWidth` and `labelLength`.
+//
+// Both queries can fail on older firmware that doesn't expose the SGD or
+// rejects `^HH`. We log and fall back to whatever's already in the inputs;
+// no red pill (this is best-effort, not a status check).
+
+const inputEdited = { dpi: false, labelW: false, labelH: false };
+['dpi', 'labelW', 'labelH'].forEach(id => {
+  // Mark "user-edited" so detection won't overwrite. Cleared at the start
+  // of each detection run.
+  $(id).addEventListener('input', () => { inputEdited[id] = true; });
+});
+
+function parseSgdValue(raw) {
+  if (raw == null) return '';
+  let s = String(raw).trim();
+  // Trim possible STX/ETX framing if the SDK passed the raw bytes through.
+  if (s.charCodeAt(0) === 2) s = s.slice(1);
+  if (s.charCodeAt(s.length - 1) === 3) s = s.slice(0, -1);
+  s = s.trim();
+  if (s.startsWith('"') && s.endsWith('"')) s = s.slice(1, -1);
+  return s.trim();
+}
+
+// Pull a plausible dpi out of any string. SGDs return the bare integer
+// (`"203"`); the ^HH RESOLUTION field uses a longer form like
+// `"300 8/mm FULL"`. The leading integer is always the dpi in both cases,
+// so a single regex covers both shapes.
+function parseDpiCandidate(s) {
+  if (!s) return null;
+  const m = String(s).match(/\d+/);
+  if (!m) return null;
+  const v = parseInt(m[0], 10);
+  return (Number.isFinite(v) && v >= 50 && v <= 1200) ? v : null;
+}
+
+// Detection has its own (generous) per-query timeout. Two reasons:
+//
+//  1. `getSGD` uses sendThenReadAllAvailable → readUntilStringReceived with
+//     an empty search string, which always recurses until /read returns
+//     empty. With the shim's 2 s read timeout that means a single SGD call
+//     takes ~2.25 s minimum even when the printer answers immediately.
+//  2. Our requests queue *behind* the auto-fired getConfiguration that the
+//     Zebra.Printer constructor kicks off (configTimeout) plus refreshStatus,
+//     adding ~500–800 ms of queue contention before our request can dispatch.
+//
+// 5 s per attempt × 1 attempt comfortably covers both. Failures here are
+// best-effort — the inputs keep their previous values, no red error pill.
+const DETECT_TIMEOUT_MS = 5000;
+
+async function withDetectTimeout(fn, label) {
+  return Promise.race([
+    fn(),
+    new Promise((_, rej) => setTimeout(
+      () => rej(new Error(label + ' timed out')), DETECT_TIMEOUT_MS)),
+  ]);
+}
+
+async function detectPrinterCapabilities() {
+  if (!zebra) return;
+  // New detection run — clear sticky-edit flags so values we learn now
+  // can populate the inputs.
+  Object.keys(inputEdited).forEach(k => inputEdited[k] = false);
+  setText('detectHint', 'Detecting printer capabilities…', 'muted');
+
+  // Fire three queries in parallel; they serialise on the SDK queue but the
+  // wall-clock cost is one queue traversal regardless of how many we ask for.
+  //   - head.resolution.in_dpi SGD          : Link-OS 4+ canonical dpi answer
+  //   - ^XA^HH^XZ config                    : printWidth, labelLength, RESOLUTION
+  //   - ~hi info                            : model string (e.g. "ZTC GX430t-300dpi")
+  const [primaryDpiRes, cfgRes, infoRes] = await Promise.allSettled([
+    withDetectTimeout(() => zebra.getSGD('head.resolution.in_dpi'), 'getSGD(head.resolution.in_dpi)'),
+    withDetectTimeout(() => zebra.getConfiguration(),               'getConfiguration'),
+    withDetectTimeout(() => zebra.getInfo(),                        'getInfo'),
+  ]);
+
+  const detected = [];
+
+  // Resolve dpi by escalating fallbacks. All four sources are usually in the
+  // ~hi/~HH/SGD trio fired above; (4) costs a fresh round-trip and only
+  // fires when the parallel results came back blank.
+  //   1. head.resolution.in_dpi SGD             — Link-OS 4+ canonical
+  //   2. cfg.settings.RESOLUTION   (from ^HH)   — older Link-OS / G-series
+  //   3. info.model regex          (from ~hi)   — "…-300dpi" suffix, very common
+  //   4. device.host_resolution SGD             — last-resort alternative
+  let detectedDpi = null;
+  let dpiSource   = null;
+
+  if (primaryDpiRes.status === 'fulfilled') {
+    const v = parseDpiCandidate(parseSgdValue(primaryDpiRes.value));
+    if (v != null) { detectedDpi = v; dpiSource = 'head.resolution.in_dpi SGD'; }
+    else log(`Detect: head.resolution.in_dpi returned ${JSON.stringify(primaryDpiRes.value)} (unparseable / unsupported)`, 'warn');
+  } else {
+    log('Detect: head.resolution.in_dpi failed: ' + (primaryDpiRes.reason && primaryDpiRes.reason.message || primaryDpiRes.reason), 'warn');
+  }
+
+  if (detectedDpi == null && cfgRes.status === 'fulfilled' && cfgRes.value && cfgRes.value.settings) {
+    const v = parseDpiCandidate(cfgRes.value.settings.RESOLUTION);
+    if (v != null) {
+      detectedDpi = v; dpiSource = '^HH RESOLUTION';
+      log(`Detect: dpi from ^HH RESOLUTION = ${JSON.stringify(cfgRes.value.settings.RESOLUTION)} → ${v}`);
+    } else if (cfgRes.value.settings.RESOLUTION) {
+      log(`Detect: ^HH RESOLUTION present but unparseable: ${JSON.stringify(cfgRes.value.settings.RESOLUTION)}`, 'warn');
+    }
+  }
+
+  if (detectedDpi == null && infoRes.status === 'fulfilled' && infoRes.value && infoRes.value.model) {
+    // Model strings look like "ZTC GX430t-300dpi" / "ZTC ZD420T-203dpi" /
+    // "ZTC ZT411-600dpi". Match the trailing "Ndpi" / "N dpi" suffix.
+    const m = String(infoRes.value.model).match(/(\d+)\s*dpi/i);
+    if (m) {
+      const v = parseInt(m[1], 10);
+      if (v >= 50 && v <= 1200) {
+        detectedDpi = v; dpiSource = `~hi model "${infoRes.value.model}"`;
+        log(`Detect: dpi from ~hi model "${infoRes.value.model}" → ${v}`);
+      }
+    } else {
+      log(`Detect: ~hi model "${infoRes.value.model}" has no parseable dpi suffix`, 'warn');
+    }
+  } else if (infoRes.status === 'rejected') {
+    log('Detect: getInfo failed: ' + (infoRes.reason && infoRes.reason.message || infoRes.reason), 'warn');
+  }
+
+  if (detectedDpi == null) {
+    try {
+      const raw = await withDetectTimeout(
+        () => zebra.getSGD('device.host_resolution'),
+        'getSGD(device.host_resolution)');
+      const v = parseDpiCandidate(parseSgdValue(raw));
+      if (v != null) { detectedDpi = v; dpiSource = 'device.host_resolution SGD'; }
+      else log(`Detect: device.host_resolution returned ${JSON.stringify(raw)} (unparseable / unsupported)`, 'warn');
+    } catch (e) {
+      log('Detect: device.host_resolution failed: ' + (e.message || e), 'warn');
+    }
+  }
+
+  // If everything failed, dump what the printer DID give us so we can extend
+  // the fallback list in a future revision without another round trip.
+  if (detectedDpi == null && cfgRes.status === 'fulfilled' && cfgRes.value && cfgRes.value.settings) {
+    const keys = Object.keys(cfgRes.value.settings);
+    log('Detect: no dpi source matched. ^HH keys: ' + keys.join(', '), 'warn');
+  }
+
+  if (detectedDpi != null) {
+    if (!inputEdited.dpi) $('dpi').value = String(detectedDpi);
+    detected.push(`${detectedDpi} dpi (${dpiSource})`);
+  }
+
+  if (cfgRes.status === 'fulfilled' && cfgRes.value) {
+    const c = cfgRes.value;
+    // Use detected dpi if we have it; otherwise honour whatever's in the
+    // input (which may be the user's manual override or the 300 default).
+    const dpiForCalc = detectedDpi || parseFloat($('dpi').value) || 300;
+    if (Number.isFinite(c.printWidth) && c.printWidth > 0 && !inputEdited.labelW) {
+      const w = c.printWidth / dpiForCalc;
+      $('labelW').value = w.toFixed(2);
+      detected.push(`${w.toFixed(2)}″ wide (PRINT WIDTH ${c.printWidth} dots)`);
+    }
+    if (Number.isFinite(c.labelLength) && c.labelLength > 0 && !inputEdited.labelH) {
+      const h = c.labelLength / dpiForCalc;
+      $('labelH').value = h.toFixed(2);
+      detected.push(`${h.toFixed(2)}″ tall (LABEL LENGTH ${c.labelLength} dots)`);
+    }
+    if (c.firmwareVersion) {
+      log(`Detect: firmware=${c.firmwareVersion}` +
+          (c.linkOSVersion && c.linkOSVersion !== '0' ? `, Link-OS=${c.linkOSVersion}` : ''));
+    }
+  } else if (cfgRes.status === 'rejected') {
+    log('Detect: getConfiguration failed: ' + (cfgRes.reason && cfgRes.reason.message || cfgRes.reason), 'warn');
+  }
+
+  if (detected.length > 0) {
+    setText('detectHint', `Detected: ${detected.join(' · ')}`, 'muted');
+    log('Detected: ' + detected.join(', '), 'ok');
+    regenAll();
+  } else {
+    setText('detectHint', 'Could not auto-detect — using current values', 'muted');
+  }
+}
+
+// =============================================================================
 // Pathway 1: Direct ZPL
 // =============================================================================
 // Layout intentionally mirrors what `buildPdf()` produces (same margins, font
@@ -341,8 +559,8 @@ $('refreshStatus').addEventListener('click', refreshStatus);
 //   body     46 dots   ≈ 11 pt Helvetica          (PDF: drawText size 11)
 //   barcode  ~200-dot bars + ~40-dot HRI line, ~840 dots wide (^BY module 6)
 //                                                  (PDF: 192 pt × ~55 pt)
-function buildDirectZpl({ title, body, value, dpi }) {
-  const pw = 3 * dpi, ll = 2 * dpi;
+function buildDirectZpl({ title, body, value, dpi, widthIn, heightIn }) {
+  const pw = Math.round(widthIn * dpi), ll = Math.round(heightIn * dpi);
   const scale = dpi / 300;
 
   const margin   = Math.round(50 * scale);
@@ -371,8 +589,12 @@ function buildDirectZpl({ title, body, value, dpi }) {
 }
 function regenerateDirect() {
   const zpl = buildDirectZpl({
-    title: $('title').value, body: $('body').value, value: $('value').value,
-    dpi:   parseInt($('dpi').value, 10),
+    title:    $('title').value,
+    body:     $('body').value,
+    value:    $('value').value,
+    dpi:      parseInt($('dpi').value, 10) || 300,
+    widthIn:  parseFloat($('labelW').value) || 3,
+    heightIn: parseFloat($('labelH').value) || 2,
   });
   $('zplDirect').value = zpl;
   setText('zplDirectSize', zpl.length.toLocaleString());
@@ -381,10 +603,10 @@ function regenerateDirect() {
 // =============================================================================
 // PDF generation (used by pathway 2)
 // =============================================================================
-async function buildPdf({ title, body, value }) {
+async function buildPdf({ title, body, value, widthIn, heightIn }) {
   const { PDFDocument, StandardFonts } = PDFLib;
   const doc = await PDFDocument.create();
-  const W = 3 * 72, H = 2 * 72;
+  const W = widthIn * 72, H = heightIn * 72;
   const page = doc.addPage([W, H]);
   const fontReg  = await doc.embedFont(StandardFonts.Helvetica);
   const fontBold = await doc.embedFont(StandardFonts.HelveticaBold);
@@ -411,7 +633,11 @@ async function buildPdf({ title, body, value }) {
 async function regeneratePdf() {
   try {
     lastPdfBytes = await buildPdf({
-      title: $('title').value, body: $('body').value, value: $('value').value,
+      title:    $('title').value,
+      body:     $('body').value,
+      value:    $('value').value,
+      widthIn:  parseFloat($('labelW').value) || 3,
+      heightIn: parseFloat($('labelH').value) || 2,
     });
     if (lastPdfUrl) URL.revokeObjectURL(lastPdfUrl);
     lastPdfUrl = URL.createObjectURL(new Blob([lastPdfBytes], { type: 'application/pdf' }));
@@ -497,7 +723,7 @@ async function regenAll() {
   setText('zplHelperSize', '0');
   $('printHelper').disabled = true;
 }
-['title', 'body', 'value', 'dpi'].forEach(id => {
+['title', 'body', 'value', 'dpi', 'labelW', 'labelH'].forEach(id => {
   const el = $(id);
   el.addEventListener('input', regenAll);
   el.addEventListener('change', regenAll);
