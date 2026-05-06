@@ -6,6 +6,10 @@ ZPL printer, with no print dialog and no per-print user interaction.
 Resolution and label dimensions are auto-detected from whichever printer
 the user picks — the prototype was developed against a GX430t but works
 unchanged on any GX/ZD/ZT/etc. that the Browser Print helper can see.
+The page has also grown a Diagnostics panel (preset Zebra commands plus a
+free-form raw-command input with decoded + hex-dumped responses), so it
+doubles as a setup / troubleshooting tool for any Zebra ZPL printer the
+helper exposes.
 
 This README captures both *how to run it* and *what we learned while
 designing it*, so the next person picking this up doesn't have to retrace
@@ -540,7 +544,13 @@ form:
 
 ---
 
-## 8. Status reads
+## 8. Querying the printer (status, capability detection, diagnostics)
+
+The page consolidates three kinds of printer query into a single "Printer"
+section (status pill + a model/firmware/dpi/connection/UID grid, with a
+single Refresh button that re-runs both halves), plus a separate
+Diagnostics section for ad-hoc commands. The mechanics differ enough to
+be worth describing separately; see 8a/8b/8c below.
 
 `Zebra.Printer.getStatus()` issues `~HS` to the device, reads the response,
 and parses it into a `Zebra.Printer.Status` object with:
@@ -639,6 +649,58 @@ warning lands in the log panel — no red error pill. If every dpi source
 fails, the log dumps the available `^HH` keys so the next round of
 fallbacks can be added without another debug round-trip.
 
+### 8c. Diagnostics & raw commands
+
+The Diagnostics section near the bottom of the page sends arbitrary
+Zebra commands directly to the selected device and shows the raw
+response. It exists for two reasons: (1) the same primitives the page
+uses for detection (SGD, `^HH`, `~hi`) are useful to inspect on their
+own when something isn't working, and (2) the page might as well be a
+generally-useful Zebra setup tool, not just a print demo.
+
+**Bypasses the SDK's request queue.** Diagnostics call
+`BrowserPrint.Device.send` / `.read` directly rather than going through
+`Zebra.Printer`'s queued `Request` machinery. That gives predictable
+single-shot behaviour and avoids contending with the SDK's internal
+auto-fired `getConfiguration` (the `configTimeout` retry cycle) or the
+page's own `refreshStatus` / detection calls. Same approach already
+used by the print pathways' `device.send(zpl)`.
+
+**Two modes per command.**
+
+| Mode | What happens | Used by |
+|---|---|---|
+| `read`  | `device.send(bytes)`; then `device.read()` raced against an 8 s timeout. Response is rendered with control characters decoded (`<STX>`, `<ETX>`, `<LF>`, `<CR>`, `<TAB>`, `<0xNN>`) plus a 16-byte/row hex dump. | Query commands: `~hi`, `~HS`, `^HH`, `^HZa`, `! U1 getvar "*"`, custom "Send + Read" |
+| `write` | `device.send(bytes)` only. No read attempted. UI confirms the byte count. | Fire-and-forget commands that don't reply: `^WC` (print config label), `~JC` (calibrate), `~JR` (reset), custom "Send (no read)" |
+
+Picking the right mode matters: a `read` against a write-only command
+(say `^WC`) waits the full 8 s before timing out; a `write` against a
+query (say `~hi`) drops the response on the floor.
+
+**Presets shipped:**
+
+| Button | Bytes sent | Mode | Notes |
+|---|---|---|---|
+| Host info `~hi`            | `~hi\r\n`               | read  | STX-framed model/firmware string. Source for the model-string dpi fallback (§8b). |
+| Host status `~HS`          | `~HS\r\n`               | read  | Three STX/ETX-framed records — see §8a. |
+| Host config `^HH`          | `^XA^HH^XZ`             | read  | Multi-line, fixed-width KEY/VALUE block. The SDK parses it into `printWidth`, `labelLength`, `firmwareVersion`, etc. |
+| All settings `^HZa`        | `^XA^HZa^XZ`            | read  | Older syntax. Empty on some firmware — useful diagnostic in itself. |
+| All SGDs `getvar "*"`      | `! U1 getvar "*"\r\n`   | read  | Can be many KB on Link-OS firmware. The 8 s read timeout is sized for this. |
+| Print config label `^WC`   | `^XA^WC^XZ`             | write | Physically prints the config — handy when there's no host network. |
+| Calibrate sensor `~JC`     | `~JC`                   | write | Auto-calibrates media sensor. Takes 5–10 s on the device; we don't wait. |
+| Reset printer `~JR`        | `~JR`                   | write | Drops the helper's connection to the device. Refresh the printer list afterwards. |
+
+**Custom command** input is a textarea: paste any ZPL block or SGD
+command, pick the appropriate Send button. Newlines pass through as-is
+(SGD commands typically need a trailing `\r\n`; ZPL blocks `^XA…^XZ`
+don't).
+
+**The raw response viewer**'s decoded line replaces all control bytes
+with named tokens so framing is visible at a glance — `<STX>` and
+`<ETX>` are the framing the SDK is checking for in §8a — and the hex
+dump below it is for the cases where a printer returns something
+malformed enough that the decoded view isn't enough to debug.
+
 ---
 
 ## 9. Production integration thoughts (for the OpenMRS module)
@@ -736,3 +798,4 @@ For production this should be vendored next to `pdf-lib.min.js`.
 | 16 | Promoted this prototype out of `openmrs-module-printer/testing/` into a standalone repo at `pih/zebra-printing-tools` — it had grown beyond a "testing" scratchpad (shim, README, SDK, multiple pathways) and the dependency direction is the other way around (the OpenMRS module would consume tools from here, not the other way). |
 | 17 | Tracked spurious red "Offline" pills + indefinite "querying…" on the status row to the SDK's STX/ETX framing check on `~HS` responses (`offline = true` whenever the trimmed body doesn't *both* start with `0x02` and end with `0x03`). The actual `~HS` reply is three STX/ETX-framed records flushed back-to-back; the shim's old `/read` returned after the first `select()` fired, often capturing only the first frame. Fixed at the shim layer with `_drain_until_quiet_fd` / `_drain_until_quiet_sock` (drain until 150 ms of silence, 1500 ms hard cap). Belt-and-braces on the page: race each `getStatus` against a 500 ms timeout, retry up to 3× silently on offline / timeout / error, surface the truthful end state. ~2.3 s worst case for both auto-fire and manual click. |
 | 18 | Generalised the prototype off the GX430t. Resolution dropdown → numeric input + datalist; new width / height inputs in inches. On device selection the page now fires `head.resolution.in_dpi` SGD + `^XA^HH^XZ` + `~hi` in parallel through the SDK queue, then resolves dpi by escalating fallbacks (canonical SGD → `cfg.settings.RESOLUTION` → model-string regex → `device.host_resolution` SGD). The GX430t we tested doesn't expose the canonical SGD or a RESOLUTION field; detection succeeds on the model-string fallback (`"GX430t-300dpi"` → 300). User edits are sticky — re-detection won't overwrite them; reselect the printer to wipe overrides and detect afresh. Detection has its own 5 s per-query timeout (separate from the status budget) because `getSGD` uses `sendThenReadAllAvailable`, which recurses until `/read` returns empty — costing ~2.25 s per SGD call even on a fast printer. |
+| 19 | Promoted the page from "demo with hidden detection" to "general Zebra setup / troubleshooting tool". Added a Printer info section (model / firmware / Link-OS / dpi / connection / UID) populated from the same detection cycle that fills the geometry inputs; merged the previously-separate Status section into it (status row spans the full info-grid width with a thin underline) and replaced the two refresh buttons with a single ↻ Refresh that re-runs status + detection together. New Diagnostics section with eight preset commands (`~hi`, `~HS`, `^HH`, `^HZa`, `getvar "*"`, `^WC`, `~JC`, `~JR`) plus a free-form custom-command textarea; presets are tagged `read` or `write` so query commands wait for a response and fire-and-forget commands skip the read. Raw-response viewer shows control bytes as `<STX>`/`<ETX>`/etc. with a 16-byte/row hex dump beneath. Diagnostics deliberately bypass the SDK's queued Request machinery (uses `device.send` / `device.read` directly) for predictable single-shot behaviour and to avoid contending with the SDK's auto-fired `configTimeout` cycle. Light visual rework: subtle 1 px rules between adjacent non-pathway sections, generous vertical margin, info card uses a grid with monospace values. |
