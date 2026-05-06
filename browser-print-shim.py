@@ -1138,6 +1138,13 @@ def main():
     else:
         log.warning('PDF conversion: DISABLED — Ghostscript not found. '
                     'Install with `sudo apt install ghostscript` to enable /convert.')
+    if _have_zpl2pdf():
+        log.info('zpl2pdf %s found — POST /zpl-to-pdf is enabled.',
+                 _zpl2pdf_path())
+    else:
+        log.warning('zpl2pdf not found in bin/<platform>/ — run '
+                    './install-zpl2pdf.sh to enable the ZPL → PDF '
+                    'preview endpoint.')
     refresh_devices(args)
 
     threads = [threading.Thread(target=serve, args=(args.http_port,), daemon=True)]
