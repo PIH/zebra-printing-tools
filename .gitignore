@@ -4,6 +4,7 @@
 # Editor / OS
 .idea/
 .vscode/
+*.iml
 *.swp
 .DS_Store
 

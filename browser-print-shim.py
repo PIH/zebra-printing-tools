@@ -106,6 +106,73 @@ log = logging.getLogger('browser-print-shim')
 
 
 # -----------------------------------------------------------------------------
+# Read drain helpers
+# -----------------------------------------------------------------------------
+# Some Zebra queries (notably ~HS) reply with multiple STX/ETX-framed records
+# flushed back-to-back from the printer. Returning after the first os.read /
+# socket.recv often captures only the first frame, which the SDK rejects:
+#
+#   function h(c){ return 2 !== c.charCodeAt(0)
+#                      || 3 !== c.charCodeAt(c.length - 1) ? false : true; }
+#   ...this.offline = !h(a.trim());
+#
+# i.e. trimmed body must start with 0x02 *and* end with 0x03, or the SDK
+# reports `offline = true` even though the printer is fine. Draining until
+# QUIET_MS of silence (after the first byte arrived) lets the trailing frames
+# land in the same response body.
+#
+# QUIET_MS is sized to be longer than the inter-frame gap a Zebra GX430t
+# leaves between ~HS records (observed: tens of ms over USB) and shorter than
+# the user-visible round-trip budget. 150 ms is comfortably both.
+DRAIN_QUIET_MS = 150
+DRAIN_HARD_CAP_MS = 1500     # safety: never spin past this even if the printer keeps emitting
+
+def _drain_until_quiet_fd(fd, max_bytes):
+    """Read from a non-blocking file descriptor until QUIET_MS of silence."""
+    out = bytearray()
+    deadline = time.monotonic() + DRAIN_HARD_CAP_MS / 1000.0
+    while True:
+        try:
+            chunk = os.read(fd, max_bytes)
+        except BlockingIOError:
+            chunk = b''
+        if chunk:
+            out.extend(chunk)
+            if len(out) >= max_bytes:
+                break
+        # Wait for more, up to QUIET_MS. If nothing arrives in that window,
+        # the printer is done flushing this reply.
+        ready, _, _ = select.select([fd], [], [], DRAIN_QUIET_MS / 1000.0)
+        if not ready:
+            break
+        if time.monotonic() > deadline:
+            log.warning('drain exceeded %d ms cap (%d bytes so far)', DRAIN_HARD_CAP_MS, len(out))
+            break
+    return bytes(out)
+
+def _drain_until_quiet_sock(sock, max_bytes):
+    """Same as _drain_until_quiet_fd but for a non-blocking socket."""
+    out = bytearray()
+    deadline = time.monotonic() + DRAIN_HARD_CAP_MS / 1000.0
+    while True:
+        try:
+            chunk = sock.recv(max_bytes)
+        except BlockingIOError:
+            chunk = b''
+        if chunk:
+            out.extend(chunk)
+            if len(out) >= max_bytes:
+                break
+        ready, _, _ = select.select([sock], [], [], DRAIN_QUIET_MS / 1000.0)
+        if not ready:
+            break
+        if time.monotonic() > deadline:
+            log.warning('drain exceeded %d ms cap (%d bytes so far)', DRAIN_HARD_CAP_MS, len(out))
+            break
+    return bytes(out)
+
+
+# -----------------------------------------------------------------------------
 # Device abstractions — common interface for USB and network printers.
 # -----------------------------------------------------------------------------
 
@@ -210,10 +277,13 @@ class UsbDevice(Device):
             ready, _, _ = select.select([self.fd], [], [], timeout)
             if not ready:
                 return b''
+            # Drain until quiet. The Zebra ~HS reply is three STX/ETX-framed
+            # records flushed back-to-back; if we return after the first
+            # os.read() we may capture only the first frame, and the SDK then
+            # reports `offline=true` because the trimmed body doesn't end on
+            # 0x03. See _drain_until_quiet() for the rationale.
             try:
-                return os.read(self.fd, max_bytes)
-            except BlockingIOError:
-                return b''
+                return _drain_until_quiet_fd(self.fd, max_bytes)
             except OSError as e:
                 self.close()
                 raise IOError(f'USB read error on {self.devpath}: {e}') from e
@@ -269,11 +339,12 @@ class NetworkDevice(Device):
             if not ready:
                 return b''
             try:
-                chunk = self.sock.recv(max_bytes)
-                self.last_io = time.monotonic()
+                # See UsbDevice.read() — same drain-until-quiet rationale for
+                # multi-frame ~HS replies.
+                chunk = _drain_until_quiet_sock(self.sock, max_bytes)
+                if chunk:
+                    self.last_io = time.monotonic()
                 return chunk
-            except BlockingIOError:
-                return b''
             except OSError as e:
                 self.close()
                 raise IOError(f'Network read error: {e}') from e

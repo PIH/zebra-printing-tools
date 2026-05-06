@@ -84,7 +84,7 @@
 
 <!-- ============================================================ PDF (shared) -->
 <section>
-  <h2>Generated PDF (shared by pathways 2 and 3)</h2>
+  <h2>Generated PDF (used by pathway 2)</h2>
   <iframe id="pdfPreview" class="pdf-preview" title="PDF preview"></iframe>
   <div class="row">
     <button id="downloadPdf">Download PDF</button>
@@ -182,7 +182,7 @@ const devSend = (dev, data) =>
 let device = null;          // BrowserPrint.Device
 let zebra  = null;          // Zebra.Printer wrapper
 let allDevices = [];
-let lastPdfBytes = null;    // Uint8Array — PDF for pathways 2 and 3
+let lastPdfBytes = null;    // Uint8Array — PDF for pathway 2
 let lastPdfUrl   = null;    // Object URL for the iframe
 
 // =============================================================================
@@ -251,6 +251,7 @@ function selectDevice(d) {
   $('convertHelper').disabled = !enabled;
   // Pathway-2 print button is re-evaluated after each successful conversion.
   if (d) refreshStatus();
+  else { setText('statusPill', '—', 'pill'); setText('statusMsg', '', 'muted'); }
 }
 
 $('printers').addEventListener('change', (e) => {
@@ -262,21 +263,68 @@ $('discover').addEventListener('click', discover);
 // =============================================================================
 // Printer status — Zebra.Printer.getStatus()
 // =============================================================================
+// `~HS` returns three STX…ETX-framed records back-to-back. The Zebra SDK
+// reports `offline=true` whenever the trimmed response doesn't begin with
+// 0x02 *and* end with 0x03 — which happens when the helper's read of the
+// USB/socket buffer captures only the first frame before the printer has
+// flushed the rest. Retry transparently on offline / timeout / error so a
+// transient race doesn't surface as a red pill the user has to click past.
+// Timing budget. A successful round-trip with the shim's read-until-quiet
+// drain is typically ~200–400 ms (write + printer response + 150 ms quiet
+// window). 500 ms per attempt × 4 attempts × 100 ms gap ≈ 2.3 s worst case
+// — short enough to fire automatically on initial device selection without
+// the page feeling stuck, long enough to ride out an intermittent.
+const STATUS_TIMEOUT_MS = 500;
+const STATUS_RETRIES    = 3;          // total attempts = 1 + STATUS_RETRIES
+const STATUS_RETRY_GAP  = 100;
+
+const wait = (ms) => new Promise(r => setTimeout(r, ms));
+
+async function getStatusWithTimeout() {
+  return Promise.race([
+    zebra.getStatus(),
+    new Promise((_, rej) => setTimeout(() => rej(new Error('status query timed out')), STATUS_TIMEOUT_MS)),
+  ]);
+}
+
 async function refreshStatus() {
   if (!zebra) return;
   setText('statusPill', 'querying…', 'pill');
-  try {
-    const st = await zebra.getStatus();
-    const ready = st.isPrinterReady();
-    const msg = (typeof st.getMessage === 'function') ? st.getMessage() : '';
-    setText('statusPill', ready ? 'READY' : 'NOT READY', 'pill ' + (ready ? 'ok' : 'err'));
-    setText('statusMsg', msg);
-    log(`Status: ready=${ready} — ${msg}`, ready ? 'ok' : 'warn');
-  } catch (e) {
-    setText('statusPill', 'error', 'pill err');
-    setText('statusMsg', String(e));
-    log('getStatus failed: ' + e, 'err');
+  setText('statusMsg', '', 'muted');
+
+  let lastErr = null;
+  for (let attempt = 0; attempt <= STATUS_RETRIES; attempt++) {
+    try {
+      const st = await getStatusWithTimeout();
+      const ready   = st.isPrinterReady();
+      const offline = !!st.offline;
+      const msg = (typeof st.getMessage === 'function') ? st.getMessage() : '';
+
+      // "Offline" from the SDK almost always means a malformed/short ~HS read
+      // rather than an actually-disconnected printer. Retry silently before
+      // surfacing it.
+      if (offline && attempt < STATUS_RETRIES) {
+        log(`Status: offline (attempt ${attempt + 1}/${STATUS_RETRIES + 1}) — retrying`, 'warn');
+        await wait(STATUS_RETRY_GAP);
+        continue;
+      }
+
+      setText('statusPill', ready ? 'READY' : 'NOT READY', 'pill ' + (ready ? 'ok' : 'err'));
+      setText('statusMsg', msg);
+      log(`Status: ready=${ready} — ${msg}` +
+          (attempt > 0 ? ` (after ${attempt} retr${attempt === 1 ? 'y' : 'ies'})` : ''),
+          ready ? 'ok' : 'warn');
+      return;
+    } catch (e) {
+      lastErr = e;
+      log(`getStatus failed (attempt ${attempt + 1}/${STATUS_RETRIES + 1}): ` + (e.message || e), 'warn');
+      if (attempt < STATUS_RETRIES) await wait(STATUS_RETRY_GAP);
+    }
   }
+
+  setText('statusPill', 'error', 'pill err');
+  setText('statusMsg', String(lastErr || 'unknown error'));
+  log('getStatus gave up after retries: ' + (lastErr && lastErr.message || lastErr), 'err');
 }
 $('refreshStatus').addEventListener('click', refreshStatus);
 
@@ -285,7 +333,7 @@ $('refreshStatus').addEventListener('click', refreshStatus);
 // =============================================================================
 // Layout intentionally mirrors what `buildPdf()` produces (same margins, font
 // heights, and bottom-anchored barcode), so labels from pathway 1 end up the
-// same physical size as labels from pathways 2 & 3 — apples to apples.
+// same physical size as labels from pathway 2 — apples to apples.
 //
 // Reference numbers (300 dpi):
 //   margin   50 dots   ≈ 12 PDF points
@@ -331,7 +379,7 @@ function regenerateDirect() {
 }
 
 // =============================================================================
-// Shared PDF generation (used by pathways 2 and 3)
+// PDF generation (used by pathway 2)
 // =============================================================================
 async function buildPdf({ title, body, value }) {
   const { PDFDocument, StandardFonts } = PDFLib;
