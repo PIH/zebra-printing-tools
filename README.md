@@ -7,25 +7,31 @@ Resolution and label dimensions are auto-detected from whichever printer
 the user picks — the page was developed against a GX430t but works
 unchanged on any GX/ZD/ZT/etc.
 
-Four print pathways covering the deployable use-cases:
+Two operations on a single ZPL textarea:
 
-1. **Direct ZPL** generated from the form fields (native primitives —
-   sharpest, smallest payload).
-2. **PDF → ZPL via the helper**, also generated from the form fields and
-   calibrated to match the native ZPL output (when both are generated
-   from the same data).
-3. **Print custom ZPL** — paste any ZPL block (e.g. server-generated
-   from the OpenMRS printer module).
-4. **Print uploaded PDF** — pick a PDF file and print via the helper's
-   conversion pipeline.
+1. **Print** — sends the textarea contents directly to the printer
+   via `device.send`. Native ZPL primitives, sharpest result, smallest
+   payload (~340 bytes for the demo label).
+2. **Generate PDF** — POSTs the ZPL to the shim's `POST /zpl-to-pdf`
+   endpoint (which shells out to the bundled `zpl2pdf` binary), gets a
+   PDF back, displays it inline in an iframe. Useful for previewing
+   labels without wasting media while iterating on the ZPL. The
+   rendered PDF can then be printed via the helper's PDF→ZPL
+   conversion (same round-trip the form-driven pathway 2 used to
+   take), giving an apples-to-apples comparison with the direct
+   primitive print.
 
-The page also includes a Diagnostics panel (preset Zebra commands plus a
-free-form raw-command input with decoded + hex-dumped responses), so it
-doubles as a setup / troubleshooting tool.
+Plus a skip-preview shortcut: pick any pre-made PDF and route it
+straight through the helper's PDF→ZPL conversion to the printer
+(useful for printing arbitrary PDFs from another system).
+
+The page also includes a Diagnostics panel (preset Zebra commands plus
+a free-form raw-command input with decoded + hex-dumped responses), so
+it doubles as a setup / troubleshooting tool.
 
 This README captures both *how to run it* and *what we learned while
-designing it*, so the next person picking this up doesn't have to retrace
-the conversation.
+designing it*, so the next person picking this up doesn't have to
+retrace the conversation.
 
 ---
 
@@ -174,76 +180,106 @@ read won't race a print job that's still flushing.
 
 ---
 
-## 4. Print pathways and trade-offs
+## 4. Two operations and a skip-preview shortcut
 
-The page exposes four pathways: two form-based (where pathway 2 is
-calibrated to match pathway 1 so they can be compared on physical labels)
-and two for arbitrary user-supplied content.
+The page exposes two main operations on the ZPL textarea, plus a
+skip-preview shortcut for arbitrary PDFs:
 
-| # | Pathway | Source | Where the conversion happens | Output | License |
-|---|---|---|---|---|---|
-| 1 | **Direct ZPL**         | form fields | (no conversion) | ~340 bytes ZPL | none |
-| 2 | **PDF → helper ZPL**   | form fields | In the helper: `Zebra.Printer.getConvertedResource(pdf, {toFormat:'zpl'})` | typically ~6–25 KB compressed ZPL | **Zebra's official helper requires a PDF feature key. The bundled `browser-print-shim.py` does not.** |
-| 3 | **Print custom ZPL**   | textarea (paste) | (none — bytes go straight to `device.send`) | whatever the caller produces | none |
-| 4 | **Print uploaded PDF** | file picker | Same helper conversion as pathway 2 | typically ~6–25 KB compressed ZPL | same feature-key caveat as pathway 2 |
+| Op | What | Source | Where the conversion happens | Output to printer |
+|---|---|---|---|---|
+| 1 | **Print ZPL** | textarea | (no conversion) | bytes from the textarea via `device.send`; native primitives rendered by the printer's firmware — sharpest, smallest payload (~340 bytes for the demo label) |
+| 2 | **Generate PDF + Print this PDF** | textarea | server-side: `POST /zpl-to-pdf` → bundled `zpl2pdf` → PDF; then on print, the helper's PDF→ZPL conversion (`Zebra.Printer.getConvertedResource` or the shim's Ghostscript pipeline) | typically 6–25 KB compressed ZPL |
+| 3 | **Print uploaded PDF** (skip-preview shortcut) | file picker | helper's PDF→ZPL conversion only | typically 6–25 KB compressed ZPL |
 
-(An earlier draft had a middle pathway that rasterized the PDF *in the
-browser* via pdf.js + a naive luminance threshold, emitting raw `^GFA`
-hex. We dropped it once the shim implemented `/convert` properly: that
-earlier pathway was strictly worse than the helper-converted pathway on
-every axis — quality, payload size, dependencies — and the only thing
-it could do that the helper pathway can't was "render the PDF without a
-helper", which doesn't matter because the helper is required for the
-actual print transport regardless. See decision log entry 13.)
+### Operation 1 — direct ZPL print
 
-### Pathway 1 (Direct ZPL)
+Text via `^A0N`, barcode via `^BC` (Code 128). Native primitives,
+rendered by the printer's firmware. Sharpest at any dpi, smallest
+payload, most robust barcode (bars land exactly on dot boundaries).
 
-Text via `^A0N`, barcode via `^BC` (Code 128). Native primitives, rendered by
-the printer's firmware. Sharp at any dpi, smallest payload, most robust
-barcode (bars land exactly on dot boundaries).
+This is the natural fit for anything OpenMRS already structures —
+patient labels, specimen labels, wristbands. The default ZPL the page
+pre-fills assumes a 3" × 2" label (sized to the printer's detected
+DPI); edit `^PW` and `^LL` if your loaded media is different.
 
-This is the natural fit for anything OpenMRS already structures — patient
-labels, specimen labels, wristbands.
+### Operation 2 — server-rendered PDF preview, then round-trip print
 
-### Pathway 2 (PDF → helper ZPL)
+The Generated PDF section is always visible. On printer-select (and on
+clicking **Generate PDF** after editing the ZPL), the page POSTs the
+textarea contents to the shim's `POST /zpl-to-pdf` endpoint, which
+shells out to a bundled `zpl2pdf` binary (cross-platform .NET
+self-contained, MIT licensed, `BinaryKits.Zpl` renderer). The rendered
+PDF is displayed inline in an iframe and saved as a blob URL for the
+**⬇ Download** link.
 
-Calls `Zebra.Printer.getConvertedResource(blob, {toFormat:'zpl', featureKey})`.
-The helper does the conversion in native code with proper halftoning. The
-resulting ZPL is sent via `device.send` so the wire timing is comparable
-across pathways.
+If the user clicks **Print this PDF**, the page hands the blob to
+`device.convertAndSendFile`, which routes through the helper's PDF→ZPL
+conversion (Zebra's licensed converter on Windows/macOS, or the
+shim's Ghostscript + Floyd-Steinberg + `^GFA` pipeline on Linux). The
+resulting ZPL is sent via `device.send`, producing a label that's a
+round-tripped equivalent of operation 1 — useful for comparing the two
+rendering pipelines on real labels.
 
-**Licensing.** The bundled SDK docs are explicit:
+**Implementation gotchas worth knowing:**
 
-> `featureKey` *string* — the licensing key for the file conversion.
-> Currently, only converting from a PDF file requires a licensing key.
+- **zpl2pdf's MediaBox is wrong.** The offline (BinaryKits) renderer
+  produces PDFs with MediaBox in dots-at-the-DPI rather than points.
+  For a 3"×2" label at 300 dpi the PDF comes out 1351×901 pts (~18.7"
+  × 12.5") rather than 216×144 pts. The shim post-processes via
+  Ghostscript `-dPDFFitPage` to rescale to the correct physical media.
+- **zpl2pdf's auto-detect adds ~50% empty padding.** With `-d <dpi>`
+  alone, the MediaBox is ~1.5× larger than the content, leaving the
+  bottom-right ~33% empty. The shim passes `-w <inches> -h <inches>
+  -u in` explicitly (parsed from `^PW` and `^LL` in the ZPL) so
+  zpl2pdf's MediaBox matches its content. Fall-through to auto-detect
+  when the ZPL has no `^PW`/`^LL`.
+- **Licensing.** When the page talks to Zebra's *official* helper on
+  Windows / macOS, `device.convertAndSendFile` for a PDF blob requires
+  a `featureKey` (per Zebra's own SDK docs). The page surfaces a hint
+  when the error message contains "license" or "key". The bundled
+  shim's `/convert` endpoint ignores the feature key — it does the
+  conversion via Ghostscript, no Zebra license required. The page
+  carries a public demo key (the same one Zebra hands out for
+  prototyping at `cagdemo.com/BrowserPrint/test/external/zebra_test.html`)
+  baked in as `DEFAULT_FEATURE_KEY` so the upload-PDF path works
+  out-of-the-box on Zebra's helper.
 
-Without a valid `featureKey`, Zebra's official helper rejects the
-conversion. The page surfaces the error and adds a hint when the message
-contains "license" or "key". The license is normally per-machine and is
-obtained from Zebra; image conversions (BMP/JPG/PNG/TIF/GIF) do *not*
-require it.
+### Operation 3 — skip-preview PDF print
 
-**Public demo key.** The `DEFAULT_FEATURE_KEY` baked into
-`browser-print.html` is the same key Zebra hands out for prototyping —
-it's hardcoded in plaintext on Zebra's own public test harness at
-[cagdemo.com/BrowserPrint/test/external/zebra_test.html](https://cagdemo.com/BrowserPrint/test/external/zebra_test.html)
-and Zebra's developer forum
-([thread 25874](https://developer.zebra.com/forum/25874)) directs people
-there to copy it. So shipping it here is the same posture Zebra itself
-takes. Caveat: Zebra could rotate or revoke it at any time, so for
-production rollouts obtain a per-machine key — *or* skip the helper
-conversion entirely via PDF Direct (next section).
+If you already have a PDF (server-generated by the OpenMRS module, an
+external system, etc.) and don't need a preview, drop it into the
+**Print uploaded PDF** section and click Print. Same helper PDF→ZPL
+conversion as the operation-2 print path — just no preview iframe in
+the way.
 
-The included Linux shim ignores the key (no licensing) and produces a
-credible substitute via Ghostscript + Floyd-Steinberg + ZPL `^GF`
-compression — see §5b.
+### Things to compare on real labels
 
-### PDF Direct (alternative — no feature key required)
+- **Barcode scannability.** Operation 1 (direct ZPL) is the gold
+  standard. Operation 2 (round-tripped via PDF) should be close at
+  300 dpi via the official helper or the shim's dither mode. Verify
+  with a hand scanner; module width is what matters.
+- **Text weight.** Direct ZPL uses Zebra's bitmap font 0 (hand-tuned
+  per dpi); operation 2's PDF uses a Helvetica-equivalent face from
+  zpl2pdf, then halftoned by the helper / shim during PDF→ZPL
+  conversion. At 300 dpi the difference is small; at 203 dpi small
+  body text from operation 2 noticeably degrades.
+- **Halftoning.** Operation 2 wins handily for grayscale gradients,
+  photographs, or logos — operation 1 has nothing to halftone (it's
+  printer primitives), and the shim's `--convert-mode dither`
+  (default) does proper Floyd-Steinberg error diffusion.
+- **Payload size.** ~340 bytes vs typically 6–25 KB. Both are trivial
+  over USB; matters if you ever spool many labels over a slow link.
+- **Latency.** Direct ZPL is essentially instant. The PDF round-trip
+  adds the zpl2pdf render (~300 ms), the gs rescale (~50 ms), and on
+  print the helper PDF→ZPL conversion (~70 ms threshold, ~200 ms
+  dither in the shim).
+
+### PDF Direct (alternative — no helper conversion required)
 
 Modern Zebra Link-OS printers (the GX430t included, with current
-firmware) support **PDF Direct**: send a raw PDF to the printer over the
-wire and the firmware rasterises it on the device. From Browser Print
-this is one call:
+firmware) support **PDF Direct**: send a raw PDF to the printer over
+the wire and the firmware rasterises it on the device. From Browser
+Print this is one call:
 
 ```js
 device.sendFile(pdfBlob, onSuccess, onError);
@@ -256,32 +292,12 @@ Setup Utilities, or the printer's web UI). Some older Link-OS firmware
 predates PDF Direct and won't accept this; check the printer's
 capabilities page before relying on it.
 
-We have *not* exercised this pathway in the page — the GX430t in
-the dev environment hasn't had its firmware audited for PDF Direct
-support — but it's the cleanest production answer if the deployed fleet
-turns out to support it: no licensing entanglement, no per-machine keys,
-no helper-side conversion latency. Worth validating early in any
-PIH rollout. See §10.
-
-### Things to compare on real labels
-
-- **Barcode scannability.** Pathway 1 is the gold standard. Pathway 2
-  should be close at 300 dpi via the official helper or the shim's dither
-  mode. Verify with a hand scanner; module width is what matters.
-- **Text weight.** Direct ZPL uses Zebra's bitmap font 0 (hand-tuned per
-  dpi); pathway 2 uses Helvetica from the PDF rasterized by the converter.
-  At 300 dpi the difference is small. At 203 dpi small body text from
-  pathway 2 noticeably degrades.
-- **Halftoning.** Pathway 2 wins handily for grayscale gradients,
-  photographs, or logos — pathway 1 has nothing to halftone (it's printer
-  primitives), and the shim's `--convert-mode dither` (default) does
-  proper error diffusion.
-- **Payload size.** ~340 bytes vs typically 6–25 KB. Both are trivial over
-  USB; matters if you ever spool many labels over a slow link.
-- **Latency.** Direct ZPL is essentially instant. Helper conversion adds a
-  localhost round-trip plus the helper's conversion time (~70 ms threshold,
-  ~200 ms dither in the shim; the official helper is C++ and should be
-  faster).
+We have *not* exercised this pathway in the page — the GX430t in the
+dev environment hasn't had its firmware audited for PDF Direct
+support — but it's the cleanest production answer if the deployed
+fleet turns out to support it: no licensing entanglement, no
+per-machine keys, no helper-side conversion latency. Worth validating
+early in any PIH rollout. See §10.
 
 ---
 
@@ -354,6 +370,38 @@ first run, for testing pages that are themselves served HTTPS).
 
 The shim handles **both transports the GX430t supports** — same wire format
 (ZPL bytes), different last hop:
+
+#### PDF preview support — install `zpl2pdf`
+
+For the page's *Generate PDF* button (and the auto-fired preview on
+printer-select) the shim shells out to a bundled `zpl2pdf` binary. To
+install it once:
+
+```
+./install-zpl2pdf.sh                 # Linux / macOS
+.\install-zpl2pdf.ps1                # Windows
+```
+
+The script downloads a pinned release from
+[brunoleocam/ZPL2PDF](https://github.com/brunoleocam/ZPL2PDF/releases)
+into `bin/<platform>/`, verifies SHA256 against the release's
+`SHA256SUMS.txt`, and is idempotent (re-runs are no-ops if already
+installed). The shim auto-detects the binary on startup and advertises
+`zpl: ["pdf"]` in its `/config.supportedConversions`. The page reads
+that flag at startup and either enables the preview flow or shows
+"PDF preview unavailable" in the Generated PDF section.
+
+Without `zpl2pdf` installed, *Print* and the upload-PDF skip-preview
+shortcut still work — only the live preview is unavailable.
+
+There's also a small `restart-shim.sh` helper in the repo that pkills
+any running shim and re-launches it; useful during the iterative dev
+cycle. Pass-through for `--network`, `--https`, etc.
+
+```
+./restart-shim.sh                          # plain run
+./restart-shim.sh --network 192.168.1.42   # with a network printer
+```
 
 #### USB printers
 
@@ -653,50 +701,11 @@ populated when the printer reported `N/mm` directly):
 The GX430t we tested doesn't expose `head.resolution.in_dpi` *or* a
 `RESOLUTION` field; detection succeeds on fallback 3 via the model
 string. Other firmware (e.g. some ZD/ZT) hits fallback 2 and yields
-`densityDpm` exactly. Width and height are filled from `printWidth` /
-`labelLength` (dots) via `dotsToValue()` in the user's current display
-unit. Manual edits to any of the three inputs (density, width, height)
-are sticky — a re-detection won't stomp on a user override; reselect
-the printer in the dropdown to wipe overrides and detect afresh.
-
-#### Display units (in / mm) and the toggle
-
-The page can show label dimensions in either inches or millimetres. The
-current unit drives:
-
-- the suffix shown after the width / height inputs (`in` / `mm`),
-- the *resolution* field's units and datalist (`dpi` with options
-  `152 / 203 / 300 / 600`, or `dots/mm` with options `6 / 8 / 12 / 24`),
-- the Printer info card's Resolution row (`300 dpi (12 dots/mm)` or
-  `12 dots/mm (300 dpi)` — primary in current unit, other in parens
-  when known),
-- the wording of the detected-summary line.
-
-**Default behaviour is honest to the printer.** If `^HH RESOLUTION`
-yields an exact `densityDpm` and the user hasn't already toggled the
-unit this session, the page auto-switches to mm so the displayed
-numbers match what the printer reports. The auto-switch is *not*
-persisted — a fresh page load starts at inches and re-evaluates from
-detection. A user toggle sets a session-only `userOverrodeUnit` flag
-that disables auto-switching for the rest of the session.
-
-**Toggling preserves physical output, not the inch/mm ratio.** Width
-and height conversions go via *dots*, not via the naïve `× 25.4`
-factor:
-
-```
-Inches mode:  3.00 in × 300 dpi  = 900 dots
-Toggle to mm: 900 dots ÷ 12 dpm  = 75.0 mm   ← same dots, same physical output
-              (NOT 3.00 × 25.4   = 76.2 mm × 12 dpm = 914 dots — different!)
-```
-
-This matters because Zebra's labelled dpi (`300`) and the underlying
-dot density (`12 dots/mm = 304.8 dpi`) round differently — going
-through the inch/mm ratio loses ~1.6%. Going through dots, the toggle
-is a pure display change. Density values themselves convert via the
-standard mapping (`6 ↔ 152`, `8 ↔ 203`, `12 ↔ 300`, `24 ↔ 600`); for
-non-standard densities, computed via `× 25.4` (lossy by ≤1.6% in the
-unusual case).
+`densityDpm` exactly. Width and height from `printWidth` / `labelLength`
+(dots) are populated in the Printer info card. Manual edits to the
+density input are sticky — a re-detection won't stomp on a user
+override; reselect the printer in the dropdown to wipe overrides and
+detect afresh.
 
 The two parser helpers documented in code:
 
@@ -830,23 +839,22 @@ Worth doing on the OpenMRS side eventually:
 ## 11. Files in this directory
 
 ```
-browser-print.html                  ← the page (single file, four print pathways + diagnostics)
-browser-print-shim.py               ← Linux dev shim (Browser Print API substitute)
-                                      — supports USB and network transports
+browser-print.html                  ← the page (single ZPL textarea + always-visible PDF preview iframe + diagnostics)
+browser-print-shim.py               ← Linux dev shim (Browser Print API substitute) — supports USB and network transports;
+                                      adds POST /zpl-to-pdf for ZPL→PDF preview when the bundled zpl2pdf is installed
+install-zpl2pdf.sh                  ← POSIX (Linux/macOS) installer for the bundled zpl2pdf binary
+install-zpl2pdf.ps1                 ← Windows installer for the bundled zpl2pdf binary
+restart-shim.sh                     ← dev helper: pkill + restart the shim in one step
+bin/                                ← installed zpl2pdf binaries (.gitignored)
+docs/superpowers/specs/             ← design specs (e.g. the 2026-05-06 ZPL textarea & PDF preview redesign)
+docs/superpowers/plans/             ← implementation plans (paired 1:1 with specs)
 README.md                           ← this file
 zebra-browser-print-js-v31250/      ← Zebra SDK 3.1.250 + sample + bundled JSDoc
-pdf-lib.min.js                      ← vendored, used by pathway 2 (PDF construction)
 printers.json                       ← optional: list of network printers for the shim
 print.min.js                        ← unused — Print.js still triggers a print dialog;
                                       left in tree only because it was already here
 shim-cert.pem, shim-key.pem         ← generated by `--https`; gitignore them
 ```
-
-External (CDN) dependencies the page loads:
-
-- `JsBarcode` 3.11.5 — generates the Code 128 PNG embedded in the PDF.
-
-For production this should be vendored next to `pdf-lib.min.js`.
 
 ---
 
@@ -876,3 +884,5 @@ For production this should be vendored next to `pdf-lib.min.js`.
 | 20 | Caught that the existing dpi parser dropped `"1280 12/MM FULL"` because it grabbed the leading integer (head width in dots, not dpi) and the "1280" failed the range gate. Replaced `parseDpiCandidate` with `parseDensity` returning both `{ dpi, dpm }` — when an `N/mm` token is present the page now also captures the *exact* dots-per-mm density. Added a unit toggle (in / mm) for the Label-geometry section: changing units flips the resolution-field label between `dpi` and `dots/mm`, swaps its datalist (`152/203/300/600` ↔ `6/8/12/24`), updates the suffix on the width/height inputs, and reflows the Printer-info card's Resolution row to match (with the other representation in parens when known). Page defaults to whatever the printer reports — auto-switches to mm on detection when `densityDpm` is captured, *not* persisted (no localStorage). User toggling sets a session-only `userOverrodeUnit` flag so re-selection of the same printer doesn't bounce them back. The toggle converts width/height via *dots*, not via the naïve `× 25.4` factor — so the toggle preserves physical print output exactly even when the labelled dpi (300) and underlying density (12/mm = 304.8 dpi) round differently. Density itself converts via the standard `6 ↔ 152`, `8 ↔ 203`, `12 ↔ 300`, `24 ↔ 600` mapping; non-standard densities go through `× 25.4` (lossy by ≤1.6% in the unusual case). |
 | 21 | Tried twice to bring the form-based PDF (pathway 2) and direct ZPL (pathway 1) outputs into closer visual alignment by tuning ZPL font heights / barcode module width — both attempts ended up worse, because (a) ZPL ^A0's visible-cap-to-cell ratio is ~75 % not the 85 % I'd assumed, so reducing 58 → 48 over-shrunk; (b) ZPL Code 128 auto-optimises mixed-letter+digit data to subset C (90 modules instead of 112), so my dynamic `^BY` calculation under-filled even after correction; (c) the GX430t firmware treats `>9` subset directives as literal data rather than encoding directives, so forcing subset B is firmware-dependent. Lesson: the two pathways have inherently different rendering pipelines (printer firmware native vs vector-rasterised) and there's no portable native-ZPL-only way to match them exactly. Reverted to the original ZPL output and *flipped the calibration direction* per user direction: changed `buildPdf` to match the ZPL output instead. New PDF rendering uses 1:1 canvas-px-to-printer-dot scale (`width: 6` in JsBarcode, drawn at `bc.width × 72/300` pt), matching ZPL's `^BY 6` directly; PDF font sizes bumped to 17 pt header / 13 pt body so Helvetica's visible cap heights match Zebra Font 0's. Font *face* difference (Helvetica vs Font 0) is the remaining gap; only fix would be a TrueType upload via `^DU`, deliberately out of scope. |
 | 22 | Reframed the page as a label-printing utility (no longer a "prototype"). Two new top-level pathways added: **Print custom ZPL** (paste arbitrary ZPL into a textarea, send via `device.send`; for ZPL pre-generated elsewhere — e.g. the OpenMRS printer module's server-side output) and **Print uploaded PDF** (file picker → `Zebra.Printer.getConvertedResource` → `device.send`; same conversion pipeline as pathway 2, reuses the PDF feature key). README §4 now documents all four pathways side-by-side. |
+| 23 | Simplified the page around a single ZPL textarea and a server-rendered PDF preview. Pathways 1 + 3 collapse into one freely-edited textarea (default pre-filled assumes a 3"×2" label sized to the detected DPI; help text points at `^PW`/`^LL` for other media). Pathway 2's in-browser PDF construction (pdf-lib + JsBarcode) is replaced by a `POST /zpl-to-pdf` endpoint on the shim that shells out to a bundled [`zpl2pdf`](https://github.com/brunoleocam/ZPL2PDF) binary (MIT licensed, .NET self-contained, `BinaryKits.Zpl` renderer). The Generated PDF section is always visible and auto-renders on printer-select. Surveyed alternatives: [`zebrafy`](https://github.com/miikanissi/zebrafy) — rejected, only decodes embedded `^GF` bitmaps, not native primitives; Labelary HTTP API — rejected, ZPL contains patient data so a third-party server is unsuitable. The bundled binary is installed via `install-zpl2pdf.sh` (POSIX) / `install-zpl2pdf.ps1` (Windows), pinned to a specific release with SHA256 verification — not vendored in git (would bloat the repo by ~250 MB). |
+| 24 | Defects-and-fixes that came out of bringing the redesign up. (a) zpl2pdf's offline-renderer `MediaBox` comes out in dots-at-the-DPI rather than points (PDF spec is points, 1 pt = 1/72 in), so a 3"×2" label produced a 12.5"×8.5" page. Workaround: shim post-processes via `gs -dPDFFitPage` to rescale to physical media size (parsed from `^PW`/`^LL` × 72 / dpi). (b) zpl2pdf's auto-detect path additionally pads the MediaBox ~1.5× wider/taller than its content, leaving the bottom-right ~33% empty — the gs rescale was carrying that padding through, making round-tripped prints come out at ~67% scale. Fix: pass `-w <in> -h <in> -u in` explicitly to zpl2pdf (same parse used for the gs target). (c) The first cut of the redesign populated the default ZPL's `^PW`/`^LL` from the printer's reported `cfg.printWidth` / `cfg.labelLength` — but those are the print HEAD width and last-calibrated label length, NOT the loaded media size. On wider-head printers (e.g. ZD-series with `^PW1280` head width), this made the hardcoded layout look "shifted left." Reverted to a hardcoded 3"×2" sized to the detected DPI; detection still populates the printer info card for diagnostics. |

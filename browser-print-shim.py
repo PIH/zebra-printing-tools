@@ -78,6 +78,7 @@ import socket
 import ssl
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -467,11 +468,79 @@ def _have_ghostscript():
     return shutil.which('gs') is not None
 
 
+def _zpl2pdf_path():
+    """Return the path to the bundled zpl2pdf binary for this platform, or
+    None if it isn't installed. Layout matches install-zpl2pdf.sh:
+    bin/<os>-<arch>/zpl2pdf[.exe].
+    """
+    import platform as _pl
+    here = os.path.dirname(os.path.abspath(__file__))
+    osname = {'Linux': 'linux', 'Darwin': 'osx', 'Windows': 'win'}.get(_pl.system())
+    if not osname:
+        return None
+    arch = {'x86_64': 'x64', 'amd64': 'x64', 'AMD64': 'x64',
+            'arm64': 'arm64', 'aarch64': 'arm64'}.get(_pl.machine())
+    if not arch:
+        return None
+    binname = 'zpl2pdf.exe' if osname == 'win' else 'zpl2pdf'
+    candidate = os.path.join(here, 'bin', f'{osname}-{arch}', binname)
+    return candidate if os.path.isfile(candidate) and os.access(candidate, os.X_OK) else None
+
+
+def _have_zpl2pdf():
+    return _zpl2pdf_path() is not None
+
+
 def _gs_version_str():
     try:
         return subprocess.check_output(['gs', '--version'], text=True, timeout=2).strip()
     except Exception:
         return '?'
+
+
+_PW_RE = re.compile(rb'\^PW\s*(\d+)')
+_LL_RE = re.compile(rb'\^LL\s*(\d+)')
+
+
+def _parse_label_size_pts(zpl_bytes, dpi):
+    """Extract physical label dimensions from a ZPL document and convert to
+    points (1/72 in). Returns (width_pts, height_pts) or None if either
+    ^PW or ^LL is missing.
+
+    zpl2pdf's offline renderer produces PDFs with MediaBox in dots-at-the-dpi
+    (a known upstream bug); we use these dimensions to rescale.
+    """
+    pw = _PW_RE.search(zpl_bytes)
+    ll = _LL_RE.search(zpl_bytes)
+    if not pw or not ll:
+        return None
+    pw_dots = int(pw.group(1))
+    ll_dots = int(ll.group(1))
+    return (pw_dots * 72.0 / dpi, ll_dots * 72.0 / dpi)
+
+
+def _rescale_pdf_via_gs(pdf_bytes, width_pts, height_pts):
+    """Rescale a PDF to the given media size using Ghostscript's
+    -dDEVICEWIDTHPOINTS/-dDEVICEHEIGHTPOINTS + -dPDFFitPage. Used to work
+    around the zpl2pdf offline-renderer page-size bug.
+
+    Returns (output_pdf_bytes, stderr_text). Raises subprocess.SubprocessError
+    on gs failure.
+    """
+    proc = subprocess.run(
+        [
+            'gs', '-dQUIET', '-dBATCH', '-dNOPAUSE',
+            '-sDEVICE=pdfwrite', '-sOutputFile=-',
+            f'-dDEVICEWIDTHPOINTS={width_pts:.3f}',
+            f'-dDEVICEHEIGHTPOINTS={height_pts:.3f}',
+            '-dFIXEDMEDIA', '-dPDFFitPage', '-',
+        ],
+        input=pdf_bytes, capture_output=True, timeout=15,
+    )
+    if proc.returncode != 0:
+        stderr = proc.stderr.decode('utf-8', errors='replace')[:2048]
+        raise subprocess.SubprocessError(f'gs rescale failed: {stderr}')
+    return proc.stdout, proc.stderr.decode('utf-8', errors='replace')
 
 
 def _render_pdf_to_pgm(pdf_bytes, dpi):
@@ -783,19 +852,21 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/write':        return self.handle_write()
         if path == '/read':         return self.handle_read()
         if path == '/convert':      return self.handle_convert()
+        if path == '/zpl-to-pdf':   return self.handle_zpl_to_pdf()
         return self._send(404, 'Not found')
 
     # ---- handlers ----
 
     def handle_config(self):
-        # Advertise PDF→ZPL conversion if Ghostscript is available.
-        # api_level 4 is the level the SDK requires for convert/* endpoints.
+        # Advertise PDF→ZPL conversion if Ghostscript is available, and
+        # ZPL→PDF if zpl2pdf is bundled in bin/. api_level 4 is what the
+        # SDK requires for any /convert endpoint to be considered.
+        conv = {}
         if _have_ghostscript():
-            api = 4
-            conv = {'pdf': ['zpl']}
-        else:
-            api = 2
-            conv = {}
+            conv['pdf'] = ['zpl']
+        if _have_zpl2pdf():
+            conv['zpl'] = ['pdf']
+        api = 4 if conv else 2
         return self._send_json(200, {
             'version': SHIM_VERSION,
             'build_number': 0,
@@ -930,6 +1001,99 @@ class Handler(BaseHTTPRequestHandler):
         # result, so a JSON-encoded string is what user code receives back.
         return self._send_json(200, zpl)
 
+    def handle_zpl_to_pdf(self):
+        """POST /zpl-to-pdf
+        Body: raw ZPL bytes (Content-Type: text/plain).
+        Query: ?dpi=<int> — print density in dots per inch (default 203).
+        Response: 200 application/pdf with the rendered PDF bytes.
+                  503 text/plain if zpl2pdf isn't installed.
+                  4xx text/plain with stderr if conversion fails.
+        Shells out to the bundled binary; ZPL goes via a temp file (not -z
+        argv) because ^GFA blocks at 600 dpi can blow past Windows' 32 KB
+        argv limit.
+        """
+        binpath = _zpl2pdf_path()
+        if binpath is None:
+            return self._send(503,
+                'zpl2pdf not installed; run ./install-zpl2pdf.sh '
+                'to enable the ZPL → PDF preview endpoint.')
+
+        zpl_bytes = self._read_body()
+        if not zpl_bytes:
+            return self._send(400, 'Empty body; expected raw ZPL.')
+
+        try:
+            dpi = int((parse_qs(urlparse(self.path).query).get('dpi') or ['203'])[0])
+        except ValueError:
+            return self._send(400, "Bad 'dpi' query param; expected an integer.")
+
+        # Temp file rather than -z argv (Windows argv is capped at 32 KB).
+        # delete=False because Windows can't reopen an open NamedTemporaryFile.
+        tmp = tempfile.NamedTemporaryFile(prefix='zpl-', suffix='.zpl', delete=False)
+        try:
+            tmp.write(zpl_bytes)
+            tmp.flush()
+            tmp.close()
+            label_pts = _parse_label_size_pts(zpl_bytes, dpi)
+
+            # Pass explicit -w/-h when we can derive them from ^PW/^LL.
+            # zpl2pdf's offline renderer's auto-detect produces a MediaBox
+            # ~1.5× larger than the content; the explicit-dim path produces
+            # a MediaBox just a few percent larger, which makes the
+            # downstream gs rescale work correctly.
+            argv = [binpath, '-i', tmp.name, '--stdout', '-d', str(dpi)]
+            if label_pts is not None:
+                w_in = label_pts[0] / 72.0
+                h_in = label_pts[1] / 72.0
+                argv += ['-w', f'{w_in:.4f}', '-h', f'{h_in:.4f}', '-u', 'in']
+
+            t0 = time.monotonic()
+            proc = subprocess.run(argv, capture_output=True, timeout=30)
+            dt_ms = (time.monotonic() - t0) * 1000.0
+            if proc.returncode != 0:
+                stderr = proc.stderr.decode('utf-8', errors='replace')[:2048]
+                log.warning('zpl2pdf failed (rc=%d): %s', proc.returncode, stderr.strip())
+                return self._send(400, stderr or f'zpl2pdf exited with code {proc.returncode}')
+            if not proc.stdout.startswith(b'%PDF-'):
+                # zpl2pdf can return exit code 0 with stdout text like
+                # "No images generated from ZPL content!" on some malformed
+                # inputs. Translate that to a 4xx so the page can show
+                # a real error message instead of garbled "PDF" content.
+                msg = (proc.stderr.decode('utf-8', errors='replace') or
+                       proc.stdout.decode('utf-8', errors='replace'))[:2048]
+                log.warning('zpl2pdf produced non-PDF output: %s', msg.strip())
+                return self._send(400, msg or 'zpl2pdf produced empty/non-PDF output')
+
+            # Workaround for the zpl2pdf offline-renderer page-size bug:
+            # MediaBox comes out in dots-at-the-dpi instead of points
+            # (1 pt = 1/72 in). When we have ^PW/^LL in the ZPL and
+            # Ghostscript on PATH, rescale to the correct physical media.
+            pdf_bytes = proc.stdout
+            if label_pts is not None and _have_ghostscript():
+                try:
+                    pdf_bytes, gs_stderr = _rescale_pdf_via_gs(
+                        pdf_bytes, label_pts[0], label_pts[1])
+                    if gs_stderr.strip():
+                        # gs emits a harmless "incorrect data check" warning
+                        # on most zpl2pdf outputs; demote to debug level so
+                        # it doesn't pollute INFO logs.
+                        log.debug('gs rescale stderr: %s', gs_stderr.strip())
+                except subprocess.SubprocessError as e:
+                    log.warning('gs rescale failed; returning unscaled PDF: %s', e)
+            log.info('zpl-to-pdf: %d bytes ZPL @ %d dpi → %d bytes PDF in %.0f ms',
+                     len(zpl_bytes), dpi, len(pdf_bytes), dt_ms)
+            return self._send(200, pdf_bytes, 'application/pdf')
+        except subprocess.TimeoutExpired:
+            return self._send(500, 'zpl2pdf timed out (>30 s)')
+        except Exception as e:
+            log.exception('zpl-to-pdf failed')
+            return self._send(500, f'zpl-to-pdf failed: {e}')
+        finally:
+            try:
+                os.unlink(tmp.name)
+            except OSError:
+                pass
+
 
 # -----------------------------------------------------------------------------
 # Server bootstrap
@@ -1046,6 +1210,13 @@ def main():
     else:
         log.warning('PDF conversion: DISABLED — Ghostscript not found. '
                     'Install with `sudo apt install ghostscript` to enable /convert.')
+    if _have_zpl2pdf():
+        log.info('zpl2pdf %s found — POST /zpl-to-pdf is enabled.',
+                 _zpl2pdf_path())
+    else:
+        log.warning('zpl2pdf not found in bin/<platform>/ — run '
+                    './install-zpl2pdf.sh to enable the ZPL → PDF '
+                    'preview endpoint.')
     refresh_devices(args)
 
     threads = [threading.Thread(target=serve, args=(args.http_port,), daemon=True)]

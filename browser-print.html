@@ -2,7 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Zebra Browser Print — Direct ZPL vs Helper-converted PDF</title>
+<title>Zebra Browser Print — ZPL editor + PDF preview</title>
+<link rel="icon" href="data:,"><!-- suppress favicon.ico 404 noise -->
 <style>
   body { font: 14px/1.45 system-ui, sans-serif; max-width: 1200px; margin: 1.2em auto; padding: 0 1em; color: #222; }
   h1 { font-size: 1.35em; margin-bottom: 0.25em; }
@@ -20,7 +21,7 @@
   .row { display: flex; gap: 0.6em; align-items: center; flex-wrap: wrap; margin: 0.4em 0; }
   .pathway { border: 1px solid #ddd; border-radius: 6px; padding: 0.75em 1em; margin: 1em 0; background: #fafafa; }
   .pathway p { margin: 0.25em 0 0.5em; color: #555; font-size: 0.92em; }
-  .pdf-preview { width: 100%; height: 220px; border: 1px solid #ccc; background: #fff; display: block; }
+  .pdf-preview { width: 100%; min-height: 400px; border: 1px solid #ddd; background: #fff; display: block; }
   details { margin: 0.5em 0; }
   details summary { cursor: pointer; color: #555; }
   #log { font: 12px/1.4 ui-monospace, Menlo, Consolas, monospace;
@@ -53,19 +54,18 @@
 <body>
 
 <h1>Browser → Zebra printer via Browser Print</h1>
-<p class="muted">
-  Print labels from the browser to any Zebra ZPL printer the Browser Print
-  helper can see. Four pathways:
-  <b>(1) Direct ZPL</b> built from primitives,
-  <b>(2) PDF converted to ZPL by the helper</b>
-  (Zebra's licensed converter or the included Linux shim),
-  <b>Print custom ZPL</b> (paste your own) and
-  <b>Print uploaded PDF</b> (pick a file). Pathways 1 and 2 share the same
-  form fields above so the two outputs can be compared side-by-side.
-  Built on Zebra's Browser Print SDK 3.1.250 — <code>BrowserPrint</code> for
-  transport, <code>Zebra.Printer</code> for parsed status. Resolution and
-  label dimensions auto-detect from the selected printer; override any
-  field to print at a different size.
+<p>
+  Print labels directly from the browser to any Zebra ZPL printer the
+  Browser Print helper can see, with no print dialog and no per-print
+  user interaction. Two operations on the same ZPL textarea: <b>Print
+  the ZPL directly</b> (vector primitives rendered by the printer
+  firmware — sharpest, smallest payload) or <b>Generate a PDF preview</b>
+  via the shim's <code>zpl2pdf</code> endpoint, then print the rasterised
+  result via the helper's PDF→ZPL conversion. The PDF preview is also
+  useful as a layout sanity-check before printing — saves wasted labels
+  while iterating on formatting. There's also a skip-preview shortcut
+  for printing existing PDFs (e.g. server-generated from another
+  system).
 </p>
 
 <!-- ============================================================ Connection -->
@@ -101,121 +101,68 @@
   </div>
 </section>
 
-<!-- ============================================================ Controls -->
-<section>
-  <h2>Label geometry</h2>
-  <div class="row">
-    <label>Units:
-      <select id="unit">
-        <option value="in" selected>inches</option>
-        <option value="mm">millimetres</option>
-      </select>
-    </label>
-    <label>Resolution:
-      <input id="density" type="number" min="100" max="1200" step="1" value="300"
-             list="density-options" style="width: 4.5em">
-      <span class="density-unit-label">dpi</span>
-    </label>
-    <datalist id="density-options"></datalist>
-    <label>Width:
-      <input id="labelW" type="number" min="0.25" max="12" step="0.05" value="3.00"
-             style="width: 4.5em"> <span class="unit-label">in</span>
-    </label>
-    <label>Height:
-      <input id="labelH" type="number" min="0.25" max="24" step="0.05" value="2.00"
-             style="width: 4.5em"> <span class="unit-label">in</span>
-    </label>
-    <span id="detectHint" class="muted" style="font-size: 0.9em"></span>
-  </div>
-  <h2>Label content</h2>
-  <div class="row">
-    <label>Header text: <input id="title" value="OpenMRS Test Label" size="24"></label>
-    <label>Body text: <input id="body" value="ID: A456123" size="20"></label>
-    <label>Barcode: <input id="value" value="A456123" size="14"></label>
-  </div>
-</section>
 
-<!-- ============================================================ PDF (shared) -->
-<section>
-  <h2>Generated PDF (used by pathway 2)</h2>
-  <iframe id="pdfPreview" class="pdf-preview" title="PDF preview"></iframe>
-  <div class="row">
-    <button id="downloadPdf">Download PDF</button>
-    <span id="pdfMeta" class="muted"></span>
-  </div>
-</section>
 
-<!-- ============================================================ Pathway 1 -->
+<!-- ============================================================ ZPL -->
 <section class="pathway">
-  <h2>1. Direct ZPL</h2>
+  <h2>ZPL</h2>
   <p>
-    Text via <code>^A0N</code>, barcode via <code>^BC</code>. Vector primitives rendered by
-    the printer firmware — sharpest result, smallest payload (~340 bytes).
+    This is the ZPL that will be sent to the printer. The default below
+    assumes a <b>3" × 2" label</b> (sized to the printer's detected DPI);
+    edit <code>^PW</code> (print width, in dots) and <code>^LL</code>
+    (label length, in dots) if your loaded media is different. Anything
+    else can be edited freely — pre-generated ZPL from the OpenMRS
+    module or another system can be pasted here directly.
   </p>
-  <details>
-    <summary>Generated ZPL (<span id="zplDirectSize">0</span> chars)</summary>
-    <textarea id="zplDirect" rows="9" readonly></textarea>
-  </details>
+  <textarea id="zpl" rows="14" spellcheck="false"
+            style="font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.92em"></textarea>
   <div class="row" style="margin-top: 0.5em">
-    <button id="printDirect" disabled>Print direct ZPL →</button>
+    <button id="printZpl" disabled>Print →</button>
+    <button id="generatePdf" disabled>Generate PDF</button>
+    <a href="#" id="resetZpl" class="muted" style="font-size: 0.92em; margin-left: 0.5em">↺ Reset to default</a>
+    <span id="zplStatus" class="muted"></span>
   </div>
 </section>
 
-<!-- ============================================================ Pathway 2 -->
+<!-- ============================================================ Generated PDF -->
 <section class="pathway">
-  <h2>2. PDF → ZPL — converted by the Browser Print helper <span class="pill warn">needs Zebra PDF feature key (or the bundled shim)</span></h2>
+  <h2>Generated PDF</h2>
   <p>
-    Calls <code>Zebra.Printer.getConvertedResource(pdfBlob, {toFormat:'zpl', featureKey})</code>,
-    which asks the local helper to convert the PDF to printer-language using Zebra's own
-    halftoning / dithering. Without a valid feature key the official helper rejects the
-    request; the included <code>browser-print-shim.py</code> ignores the key and converts
-    via Ghostscript + Floyd-Steinberg + ZPL <code>^GF</code> compression.
+    Rendered server-side by <code>zpl2pdf</code> via the shim's
+    <code>POST /zpl-to-pdf</code> endpoint. Updates whenever you click
+    <b>Generate PDF</b> above (auto-fired once on printer-select). Useful
+    for previewing labels without wasting media while iterating on the
+    ZPL.
   </p>
-  <div class="row">
-    <label>PDF feature key:
-      <input id="featureKey" type="password" size="40"
-             placeholder="paste Zebra PDF conversion license key">
-    </label>
-    <label><input id="rememberKey" type="checkbox"> remember in localStorage</label>
+  <div id="pdfPreviewWrap">
+    <iframe id="pdfPreview" class="pdf-preview" title="PDF preview"></iframe>
+    <div id="pdfMessage" class="muted" style="display: none; padding: 1em; border: 1px dashed #ccc"></div>
   </div>
-  <details>
-    <summary>Generated ZPL (<span id="zplHelperSize">0</span> chars)</summary>
-    <textarea id="zplHelper" rows="9" readonly placeholder="Click 'Convert via helper' to populate"></textarea>
-  </details>
   <div class="row" style="margin-top: 0.5em">
-    <button id="convertHelper" disabled>Convert via helper</button>
-    <button id="printHelper" disabled>Print helper-converted ZPL →</button>
-    <span id="helperStatus" class="muted"></span>
+    <button id="printPdf" disabled>Print this PDF →</button>
+    <a id="downloadPdf" download="label.pdf" style="margin-left: 0.5em; pointer-events: none; opacity: 0.45">⬇ Download</a>
+    <span id="pdfStatus" class="muted"></span>
   </div>
 </section>
 
-<!-- ============================================================ Custom ZPL -->
-<section class="pathway">
-  <h2>Print custom ZPL</h2>
-  <p>
-    Send any ZPL block (typically <code>^XA…^XZ</code>) directly to the selected
-    printer. Useful for printing pre-generated ZPL from another system (e.g. the
-    OpenMRS printer module's server-side output) or for testing arbitrary ZPL
-    snippets without going through the form fields above.
-  </p>
-  <textarea id="customZpl" rows="8"
-            placeholder="^XA&#13;&#10;^FO50,50^A0N,40,40^FDhello^FS&#13;&#10;^XZ"></textarea>
-  <div class="row" style="margin-top: 0.5em">
-    <button id="printCustomZpl" disabled>Print custom ZPL →</button>
-    <span id="customZplStatus" class="muted"></span>
-  </div>
-</section>
 
 <!-- ============================================================ Upload PDF -->
 <section class="pathway">
   <h2>Print uploaded PDF</h2>
   <p>
-    Pick a PDF file and the page will run it through
-    <code>Zebra.Printer.getConvertedResource</code> (the same helper / shim
-    pipeline used by the form-based PDF pathway above) and print the resulting
-    ZPL. Uses the PDF feature key from pathway 2.
+    If you already have a PDF, skip the preview and print it directly via
+    the helper conversion (<code>Zebra.Printer.getConvertedResource</code>).
+    Same conversion pipeline that the Generated PDF section uses to print
+    the ZPL→PDF round-trip.
   </p>
   <div class="row">
+    <label>PDF feature key:
+      <input id="featureKey" type="password" size="40"
+             placeholder="paste Zebra PDF conversion license key (ignored by the shim)">
+    </label>
+    <label><input id="rememberKey" type="checkbox"> remember in localStorage</label>
+  </div>
+  <div class="row" style="margin-top: 0.5em">
     <input type="file" id="customPdfFile" accept="application/pdf,.pdf">
     <span id="customPdfInfo" class="muted"></span>
   </div>
@@ -274,8 +221,6 @@
 <!-- ============================================================ Libraries -->
 <script src="zebra-browser-print-js-v31250/BrowserPrint-3.1.250.min.js"></script>
 <script src="zebra-browser-print-js-v31250/BrowserPrint-Zebra-1.1.250.min.js"></script>
-<script src="pdf-lib.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"></script>
 
 <script>
 'use strict';
@@ -314,8 +259,11 @@ const devSend = (dev, data) =>
 let device = null;          // BrowserPrint.Device
 let zebra  = null;          // Zebra.Printer wrapper
 let allDevices = [];
-let lastPdfBytes = null;    // Uint8Array — PDF for pathway 2
-let lastPdfUrl   = null;    // Object URL for the iframe
+let lastPdfBytes = null;    // Uint8Array — last successful /zpl-to-pdf result
+let lastPdfUrl   = null;    // blob: URL backing the iframe + Download link
+let lastDetected = null;    // {dpi, dpm, widthDots, heightDots, model, …}
+let pdfPreviewSupported = false;   // from /config supportedConversions.zpl
+let defaultZplSnapshot = '';// most recent default written into the textarea
 
 // =============================================================================
 // Connection: BrowserPrint.getDefaultDevice + getLocalDevices
@@ -325,9 +273,14 @@ async function refreshHelperInfo() {
     const cfg = await bpGetAppConfig();
     const apiLevel = cfg.api_level ?? '?';
     const platform = cfg.platform ?? '?';
+    const conv = cfg.supportedConversions || {};
+    pdfPreviewSupported = Array.isArray(conv.zpl) && conv.zpl.includes('pdf');
     setText('apiInfo', `helper: ${platform}, API L${apiLevel}`, 'pill ok');
     log(`Browser Print: platform=${platform}, api_level=${apiLevel}, ` +
-        `supportedConversions=${JSON.stringify(cfg.supportedConversions)}`);
+        `supportedConversions=${JSON.stringify(conv)}`);
+    if (!pdfPreviewSupported) {
+      setPdfMessage('PDF preview unavailable. This requires browser-print-shim.py with zpl2pdf installed (see README §5b). The Print ZPL button and the upload-PDF section still work.', 'warn');
+    }
   } catch (e) {
     setText('apiInfo', 'helper: unreachable', 'pill err');
     log('getApplicationConfiguration failed: ' + e, 'err');
@@ -375,19 +328,18 @@ async function discover() {
 }
 
 function selectDevice(d) {
+  const previousUidLocal = device ? device.uid : null;
   device = d;
   zebra = d ? new Zebra.Printer(d) : null;
   const enabled = !!device;
-  $('printDirect').disabled    = !enabled;
-  $('convertHelper').disabled  = !enabled;
-  $('printCustomZpl').disabled = !enabled;
+  $('printZpl').disabled    = !enabled;
+  $('generatePdf').disabled = !(enabled && pdfPreviewSupported);
   // The PDF-upload Print button is also gated on a file having been picked;
   // re-evaluated by the file-input change handler when a file is chosen.
   $('printCustomPdf').disabled = !(enabled && $('customPdfFile').files.length > 0);
   // setDiagEnabled toggles #refreshPrinter, the diag preset buttons, and
   // the custom-command Send / Send+Read buttons together.
   setDiagEnabled(enabled);
-  // Pathway-2 print button is re-evaluated after each successful conversion.
   clearPrinterInfo();
   if (d) {
     // Populate connection / UID immediately; detection fills the rest.
@@ -396,10 +348,20 @@ function selectDevice(d) {
     // Fire alongside refreshStatus — the SDK serialises device requests
     // internally (single queue per Printer), so they don't actually race
     // each other on the wire.
-    detectPrinterCapabilities();
+    // ZPL regeneration follows in the .then() below; detectPrinterCapabilities
+    // only updates lastDetected (used by the same-printer / different-printer
+    // branch logic).
+    detectPrinterCapabilities().then(() => {
+      if (!defaultZplSnapshot) {
+        regenerateDefaultZpl();
+      } else if (device && device.uid === previousUidLocal) {
+        regenerateDefaultZpl();
+      } else {
+        maybeRegenerateDefaultZpl();
+      }
+    });
   } else {
     setText('statusPill', '—', 'pill'); setText('statusMsg', '', 'muted');
-    setText('detectHint', '', 'muted');
   }
 }
 
@@ -503,165 +465,21 @@ $('refreshPrinter').addEventListener('click', () => {
 // rejects `^HH`. We log and fall back to whatever's already in the inputs;
 // no red pill (this is best-effort, not a status check).
 
-const inputEdited = { density: false, labelW: false, labelH: false };
-['density', 'labelW', 'labelH'].forEach(id => {
-  // Mark "user-edited" so detection won't overwrite. Cleared at the start
-  // of each detection run.
-  $(id).addEventListener('input', () => { inputEdited[id] = true; });
-});
-
-// Density state. Tracked in *both* representations so the page can do exact
-// integer math in mm mode whenever the printer reported in dots/mm.
+// Density state. Tracked in *both* representations so the printer-info
+// card can display the exact reported value.
 //   densityDpi — what the printer would call its dpi (snapped to standard
 //                Zebra labelled values: 152/203/300/600)
 //   densityDpm — exact dots-per-mm; only populated when the printer reported
-//                "N/mm" directly. Cleared when the user manually edits the
-//                density input to something inconsistent with the old dpm.
+//                "N/mm" directly.
 let densityDpi = 300;
 let densityDpm = null;
 
 // Unit conversions between dpi (dots-per-inch) and dpm (dots-per-mm).
 // Standard Zebra densities are mapped exactly; uncommon ones are computed.
-const STANDARD_DPI_BY_DPM = { 6: 152, 8: 203, 12: 300, 24: 600 };
-const STANDARD_DPM_BY_DPI = { 152: 6, 203: 8, 300: 12, 600: 24 };
-function dpmToDpi(dpm) { return STANDARD_DPI_BY_DPM[dpm] || Math.round(dpm * 25.4); }
-function dpiToDpm(dpi) { return STANDARD_DPM_BY_DPI[dpi] || (dpi / 25.4); }
-
-// Unit toggle: 'in' or 'mm'. Drives every unit-derived label and the
-// conversion math. NOT persisted across page refreshes — instead the
-// session-only `userOverrodeUnit` flag tracks whether the user has made
-// an explicit choice (so detection's auto-switch only fires the first
-// time, not on every printer reselection).
-function unit() { return $('unit').value; }
-let userOverrodeUnit = false;
-let _lastUnit = unit();
-
-// Refresh internal density state from whatever's currently in the input.
-// Called both when the user types and after programmatic value changes.
-function syncDensityFromInput() {
-  const v = parseFloat($('density').value);
-  if (!Number.isFinite(v) || v <= 0) return;
-  if (unit() === 'mm') {
-    densityDpm = v;
-    densityDpi = dpmToDpi(v);
-  } else {
-    densityDpi = v;
-    // If the user typed a dpi that doesn't match what dpmToDpi(densityDpm)
-    // would produce, the old dpm correlation is stale — clear it.
-    if (densityDpm != null && dpmToDpi(densityDpm) !== v) densityDpm = null;
-  }
-}
-$('density').addEventListener('input', syncDensityFromInput);
-
-// dots ↔ display-value conversions. mm uses dpm directly when known
-// (exact integer math); otherwise falls back through dpi × 25.4.
-function valueToDots(value) {
-  if (!Number.isFinite(value)) return 0;
-  if (unit() === 'mm') return Math.round(value * (densityDpm || densityDpi / 25.4));
-  return Math.round(value * densityDpi);
-}
-function dotsToValue(dots) {
-  if (!Number.isFinite(dots)) return 0;
-  if (unit() === 'mm') return densityDpm ? dots / densityDpm : dots * 25.4 / densityDpi;
-  return dots / densityDpi;
-}
-// PDF works in inches/points regardless of UI unit.
-function valueToInches(value) { return unit() === 'mm' ? value / 25.4 : value; }
-function formatDisplayValue(v) { return unit() === 'mm' ? v.toFixed(1) : v.toFixed(2); }
 // Density values render as integers when they round cleanly (300 dpi, 12 dpm),
 // one decimal for unusual densities computed from N×25.4.
 function formatDensityValue(v) { return Number.isInteger(v) ? String(v) : v.toFixed(1); }
 
-// Apply unit-dependent attributes to inputs / labels / datalists. Called
-// whenever the unit changes (auto or manual).
-function applyUnitToInputs() {
-  const u = unit();
-  document.querySelectorAll('.unit-label').forEach(el => el.textContent = u);
-
-  const wEl = $('labelW'), hEl = $('labelH');
-  if (u === 'mm') {
-    wEl.step = hEl.step = '0.5';
-    wEl.min  = hEl.min  = '6';
-    wEl.max  = '300'; hEl.max = '600';
-  } else {
-    wEl.step = hEl.step = '0.05';
-    wEl.min  = hEl.min  = '0.25';
-    wEl.max  = '12';  hEl.max = '24';
-  }
-
-  const dEl = $('density');
-  const dLabel = document.querySelector('.density-unit-label');
-  const dList  = $('density-options');
-  if (u === 'mm') {
-    dEl.min = '4'; dEl.max = '40'; dEl.step = '1';
-    dLabel.textContent = 'dots/mm';
-    dList.innerHTML = '<option value="6"></option><option value="8"></option>' +
-                      '<option value="12"></option><option value="24"></option>';
-  } else {
-    dEl.min = '100'; dEl.max = '1200'; dEl.step = '1';
-    dLabel.textContent = 'dpi';
-    dList.innerHTML = '<option value="152"></option><option value="203"></option>' +
-                      '<option value="300"></option><option value="600"></option>';
-  }
-}
-
-// Switch unit (manual or auto). Width / height conversions go via *dots*
-// rather than the naïve ×25.4 factor, so the toggle preserves the actual
-// number of dots in the ZPL output (and therefore the physical print size)
-// even when the dpi-vs-dpm representations round differently — e.g.
-// 3.00 in × 300 dpi = 900 dots; the equivalent in mm is 75.0 mm × 12 dpm
-// = 900 dots, NOT 76.2 mm × 12 dpm = 914 dots. Density conversions go
-// via the standard dpi/dpm mapping.
-function switchUnit(newUnit, reason) {
-  if (newUnit === _lastUnit) return;
-
-  // Capture dots in the *old* unit before switching, so dotsToValue below
-  // can reproject them in the new unit.
-  const w = parseFloat($('labelW').value);
-  const h = parseFloat($('labelH').value);
-  const widthDots  = Number.isFinite(w) ? valueToDots(w) : null;
-  const heightDots = Number.isFinite(h) ? valueToDots(h) : null;
-
-  // Density is intrinsic to the printer, not the label — convert via the
-  // standard dpi↔dpm mapping (no dots involved).
-  const d = parseFloat($('density').value);
-  const newDensity = Number.isFinite(d)
-    ? (_lastUnit === 'in' ? dpiToDpm(d) : dpmToDpi(d))
-    : null;
-
-  // Flip the unit. Everything below uses the new unit + new density state.
-  $('unit').value = newUnit;
-  _lastUnit = newUnit;
-  applyUnitToInputs();
-  if (newDensity != null) $('density').value = formatDensityValue(newDensity);
-  syncDensityFromInput();
-
-  if (widthDots  != null) $('labelW').value = formatDisplayValue(dotsToValue(widthDots));
-  if (heightDots != null) $('labelH').value = formatDisplayValue(dotsToValue(heightDots));
-
-  // Reflow the printer-info card's Resolution row to the new unit.
-  updateInfoResolution();
-
-  if (reason) log(`Switching display to ${newUnit} (${reason}).`);
-}
-
-// One-shot auto-switch to mm. Fires from detection when the printer reports
-// in dots/mm AND the user hasn't already toggled the unit themselves this
-// session. Not persisted — a new page load re-evaluates from detection.
-function maybeAutoSwitchUnitToMm(reason) {
-  if (unit() === 'mm') return;
-  if (userOverrodeUnit) return;
-  switchUnit('mm', reason);
-}
-
-$('unit').addEventListener('change', () => {
-  userOverrodeUnit = true;
-  switchUnit(unit());
-  regenAll();
-});
-
-// Initial setup: populate datalist + labels for the default (inches).
-applyUnitToInputs();
 
 function parseSgdValue(raw) {
   if (raw == null) return '';
@@ -740,10 +558,6 @@ async function withDetectTimeout(fn, label) {
 
 async function detectPrinterCapabilities() {
   if (!zebra) return;
-  // New detection run — clear sticky-edit flags so values we learn now
-  // can populate the inputs.
-  Object.keys(inputEdited).forEach(k => inputEdited[k] = false);
-  setText('detectHint', 'Detecting printer capabilities…', 'muted');
 
   // Fire three queries in parallel; they serialise on the SDK queue but the
   // wall-clock cost is one queue traversal regardless of how many we ask for.
@@ -832,35 +646,18 @@ async function detectPrinterCapabilities() {
     detected.push(`${detectedDpi} dpi (${dpiSource})`);
   }
 
-  // Auto-switch to mm BEFORE rendering anything into inputs, so the values
-  // we're about to write land in the right unit. Honest to what the
-  // printer reported; sticky for the session unless user toggles back.
-  if (detectedDpm != null) maybeAutoSwitchUnitToMm('printer reports density as dots/mm');
-
-  // Now write the detected density value into the input in the current unit
-  // (skip if the user has already typed something — sticky edit).
-  if (detectedDpi != null && !inputEdited.density) {
-    if (unit() === 'mm') {
-      $('density').value = formatDensityValue(densityDpm || dpiToDpm(densityDpi));
-    } else {
-      $('density').value = String(densityDpi);
-    }
-  }
-
-  // Unit-aware label for the detected dimension lines (read AFTER the
-  // possible auto-switch above so labels match the unit we'll display in).
-  const u = unit();
+  // Detect label dimensions (dots)
+  let detectedWidthDots  = null;
+  let detectedHeightDots = null;
   if (cfgRes.status === 'fulfilled' && cfgRes.value) {
     const c = cfgRes.value;
-    if (Number.isFinite(c.printWidth) && c.printWidth > 0 && !inputEdited.labelW) {
-      const v = dotsToValue(c.printWidth);
-      $('labelW').value = formatDisplayValue(v);
-      detected.push(`${formatDisplayValue(v)} ${u} wide (PRINT WIDTH ${c.printWidth} dots)`);
+    if (Number.isFinite(c.printWidth) && c.printWidth > 0) {
+      detectedWidthDots = c.printWidth;
+      detected.push(`PRINT WIDTH ${c.printWidth} dots`);
     }
-    if (Number.isFinite(c.labelLength) && c.labelLength > 0 && !inputEdited.labelH) {
-      const v = dotsToValue(c.labelLength);
-      $('labelH').value = formatDisplayValue(v);
-      detected.push(`${formatDisplayValue(v)} ${u} tall (LABEL LENGTH ${c.labelLength} dots)`);
+    if (Number.isFinite(c.labelLength) && c.labelLength > 0) {
+      detectedHeightDots = c.labelLength;
+      detected.push(`LABEL LENGTH ${c.labelLength} dots`);
     }
     if (c.firmwareVersion) {
       log(`Detect: firmware=${c.firmwareVersion}` +
@@ -871,12 +668,19 @@ async function detectPrinterCapabilities() {
   }
 
   if (detected.length > 0) {
-    setText('detectHint', `Detected: ${detected.join(' · ')}`, 'muted');
     log('Detected: ' + detected.join(', '), 'ok');
-    regenAll();
   } else {
-    setText('detectHint', 'Could not auto-detect — using current values', 'muted');
+    log('Detect: could not auto-detect printer capabilities', 'warn');
   }
+
+  // Store detected values in lastDetected for use by ZPL generation.
+  lastDetected = {
+    dpi:        densityDpi,
+    dpm:        densityDpm,
+    widthDots:  detectedWidthDots  || Math.round(3.0 * densityDpi),
+    heightDots: detectedHeightDots || Math.round(2.0 * densityDpi),
+    model:      (infoRes.status === 'fulfilled' && infoRes.value) ? infoRes.value.model : null,
+  };
 
   // Push everything we learned into the elevated info panel. Resolution
   // is rendered from the module-level density state (densityDpi / densityDpm)
@@ -886,6 +690,7 @@ async function detectPrinterCapabilities() {
     info:   infoRes.status === 'fulfilled' ? infoRes.value : null,
     config: cfgRes.status  === 'fulfilled' ? cfgRes.value  : null,
   });
+  // (ZPL regeneration is triggered by selectDevice's detectPrinterCapabilities callback)
 }
 
 // =============================================================================
@@ -920,10 +725,8 @@ function updatePrinterInfo({ device, info, config } = {}) {
   updateInfoResolution();
 }
 
-// Renders the Resolution row of the printer info card in the user's current
-// unit (primary), with the other representation in parentheses when known.
-// Called both from updatePrinterInfo (after detection) and from switchUnit
-// (so the row reflows when the user toggles the unit).
+// Renders the Resolution row of the printer info card.
+// Always shows dpi as primary, with dots/mm in parentheses when known.
 function updateInfoResolution() {
   if (densityDpi == null && densityDpm == null) {
     setText('info-dpi', '—');
@@ -931,15 +734,8 @@ function updateInfoResolution() {
   }
   const dpi = densityDpi;
   const dpm = densityDpm;
-  if (unit() === 'mm') {
-    const dpmShown = dpm != null ? formatDensityValue(dpm)
-                                 : formatDensityValue(dpi / 25.4);
-    setText('info-dpi',
-      dpi != null ? `${dpmShown} dots/mm (${dpi} dpi)` : `${dpmShown} dots/mm`);
-  } else {
-    setText('info-dpi',
-      dpm != null ? `${dpi} dpi (${formatDensityValue(dpm)} dots/mm)` : `${dpi} dpi`);
-  }
+  setText('info-dpi',
+    dpm != null ? `${dpi} dpi (${formatDensityValue(dpm)} dots/mm)` : `${dpi} dpi`);
 }
 
 // =============================================================================
@@ -1046,281 +842,147 @@ function setDiagEnabled(enabled) {
 }
 
 // =============================================================================
-// Pathway 1: Direct ZPL
+// Default ZPL for the textarea
 // =============================================================================
-// Native ZPL primitives — header / body via `^A0`, barcode via `^BC` Code 128
-// with the printer's built-in HRI. Sharp at any dpi, smallest payload, and
-// the most robust barcode (bars land exactly on dot boundaries because the
-// printer's firmware is choosing them).
+// Default ZPL written into the textarea on printer-select. Header / body /
+// barcode are now hard-coded — the previous form inputs are gone.
 //
-// Reference numbers (300 dpi):
-//   margin   50 dots   ≈ 12 PDF points
-//   header   58 dots   ≈ 14 pt           (PDF: drawText size 14 Helvetica Bold)
-//   body     46 dots   ≈ 11 pt           (PDF: drawText size 11 Helvetica)
-//   barcode  ~200-dot bars + ~40-dot HRI line, ^BY module 6
-//
-// The output will *not* look identical to pathway 2's PDF→helper-converted
-// version; that's intentional and worth understanding (see README §4):
-//
-//   - Font face. Zebra Font 0 ≠ Helvetica. Strokes are thinner, letter
-//     shapes are different. Only fix is to upload a TrueType file via
-//     `^DU` and use `^A@`; out of scope here.
-//   - Barcode width. JsBarcode renders all 112 modules at 2 px each on a
-//     canvas that gets stretched to fill the available label width.
-//     Native ZPL Code 128 with auto-optimisation collapses digit runs to
-//     subset C — "A456123" becomes ~90 modules instead of 112. With the
-//     same `^BY` module width, the native bar block ends up ~25 % narrower
-//     than the PDF version. Forcing subset B with `>9` directives is
-//     firmware-dependent (the GX430t we tested treats `>9` as literal data
-//     rather than a subset selector); for that printer the only reliable
-//     way to match the PDF width is to render the barcode in JS via
-//     JsBarcode and embed it as a `^GFA` bitmap — which is essentially
-//     what pathway 2 does. We don't do that in pathway 1.
-//   - HRI font + centring. Same root cause: the printer renders HRI
-//     centred under whatever the actual bar block is, so a narrower bar
-//     block puts the HRI further left than the PDF's HRI.
-//
-// Net effect: pathway 1 produces the native ZPL rendering and the
-// form-based PDF pathway is calibrated to match it (see buildPdf below)
-// when both are generated from the same form fields. Visual differences
-// that remain (font face, hairline kerning) are inherent to native
-// vs vector pipelines.
-function buildDirectZpl({ title, body, value, dpi, widthDots, heightDots }) {
-  const pw = widthDots, ll = heightDots;
-  const scale = dpi / 300;
-
-  const margin   = Math.round(50 * scale);
-  const headerH  = Math.round(58 * scale);
-  const bodyGap  = Math.round(22 * scale);   // gap between header and body
-  const bodyH    = Math.round(46 * scale);
-  const bcModule = Math.max(2, Math.round(6 * scale));   // module width in dots
-  const bcHeight = Math.round(200 * scale);  // bar height (HRI text is extra below)
-  const bcHriH   = Math.round(40 * scale);   // approx height of HRI text line
-
-  // Anchor the barcode to the bottom, leaving `margin` of clear space below.
-  const bcY = ll - margin - bcHriH - bcHeight;
-
+// Dimensions: hardcoded 3"×2" label scaled to the detected DPI. The
+// printer's reported printWidth / labelLength are NOT used here; those
+// are the print HEAD width and last-calibrated length, not the loaded
+// media size. Layout constants (font sizes, positions) were tuned for a
+// 3"×2" 300dpi label; using a wider ^PW would make the content look
+// left-shifted on the wider print area. Whoever needs a different size
+// edits ^PW / ^LL directly in the textarea.
+function defaultZpl({ dpi }) {
+  const widthDots = Math.round(3 * dpi);
+  const heightDots = Math.round(2 * dpi);
   return [
     '^XA',
-    '^CI28',                                 // UTF-8
-    `^PW${pw}`,
-    `^LL${ll}`,
+    '^CI28',
+    `^PW${widthDots}`,
+    `^LL${heightDots}`,
     '^LH0,0',
-    `^FO${margin},${margin}^A0N,${headerH},${headerH}^FD${title}^FS`,
-    `^FO${margin},${margin + headerH + bodyGap}^A0N,${bodyH},${bodyH}^FD${body}^FS`,
-    `^BY${bcModule},2,${bcHeight}`,
-    `^FO${margin},${bcY}^BCN,${bcHeight},Y,N,N^FD${value}^FS`,
+    '^FO50,50^A0N,58,58^FDOpenMRS Test Label^FS',
+    '^FO50,130^A0N,46,46^FDID: A456123^FS',
+    '^BY6,2,200',
+    '^FO50,310^BCN,200,Y,N,N^FDA456123^FS',
     '^XZ',
   ].join('\n');
 }
-function regenerateDirect() {
-  const w = parseFloat($('labelW').value) || (unit() === 'mm' ? 76 : 3);
-  const h = parseFloat($('labelH').value) || (unit() === 'mm' ? 51 : 2);
-  const zpl = buildDirectZpl({
-    title:      $('title').value,
-    body:       $('body').value,
-    value:      $('value').value,
-    dpi:        densityDpi,        // always in dpi for ^A0/^BY scaling
-    widthDots:  valueToDots(w),
-    heightDots: valueToDots(h),
-  });
-  $('zplDirect').value = zpl;
-  setText('zplDirectSize', zpl.length.toLocaleString());
-}
+
 
 // =============================================================================
-// PDF generation (used by pathway 2)
+// ZPL textarea + Generated PDF lifecycle (per spec §7)
 // =============================================================================
-// Calibrated to match buildDirectZpl()'s native ZPL output: when the helper
-// rasterises this PDF at the printer's dpi (300 by default in the shim),
-// the result reproduces what pathway 1 produces directly.
-//
-// Sizing strategy:
-//
-//   margin     12 pt   = 50 dots @ 300 dpi      → matches ZPL margin
-//   header     17 pt                            → Helvetica Bold visible cap
-//                                                 ≈ 12 pt ≈ 50 dots ≈ ZPL ^A0N,58
-//   body       13 pt                            → cap ≈ 9 pt ≈ 38 dots ≈ ZPL ^A0N,46
-//   barcode    drawn at 1 canvas-px : 1 dot     → 6 px module = 6 dot module
-//                                                 (matches ZPL ^BY 6)
-//                                                 200 px bars = 200 dot bars
-//                                                 (matches ZPL ^BC h=200)
-//   HRI        50 px font                       → matches ZPL inherited body font
-//
-// The 1:1 px-to-dot rendering is achieved by drawing the JsBarcode canvas at
-// width = bc.width × 72/300 pt; one canvas pixel becomes exactly one printer
-// dot when rasterised at 300 dpi. Subset-C optimisation in JsBarcode produces
-// the same module count as ZPL's `^BC` (which also auto-optimises), so the
-// resulting bar block has the same width.
-//
-// What we do *not* match: the font *face*. Zebra Font 0 is not Helvetica;
-// stroke weights and letter shapes differ. Fixing that requires uploading
-// a TrueType file via `^DU` and using `^A@`, which is outside this page's
-// scope.
-async function buildPdf({ title, body, value, widthIn, heightIn }) {
-  const { PDFDocument, StandardFonts } = PDFLib;
-  const doc = await PDFDocument.create();
-  const W = widthIn * 72, H = heightIn * 72;
-  const page = doc.addPage([W, H]);
-  const fontReg  = await doc.embedFont(StandardFonts.Helvetica);
-  const fontBold = await doc.embedFont(StandardFonts.HelveticaBold);
 
-  const margin     = 12;
-  const headerSize = 17;
-  const bodySize   = 13;
-  const lineGap    = 5;          // gap between header descender and body cap
-  const CAP_RATIO  = 0.7;        // Helvetica cap height as fraction of point size
-
-  const headerCap = headerSize * CAP_RATIO;
-  const bodyCap   = bodySize   * CAP_RATIO;
-
-  // drawText's `y` is the baseline. Position so the header glyph TOP sits
-  // at `margin` from the PDF top; body glyph TOP sits `lineGap` below the
-  // header baseline (which is the bottom of header caps).
-  page.drawText(title, {
-    x: margin,
-    y: H - margin - headerCap,
-    size: headerSize,
-    font: fontBold,
-  });
-  page.drawText(body, {
-    x: margin,
-    y: H - margin - headerCap - lineGap - bodyCap,
-    size: bodySize,
-    font: fontReg,
-  });
-
-  // Barcode rendered at 1 canvas-px : 1 printer-dot at 300 dpi.
-  // `width: 6` matches pathway 1's hardcoded `^BY 6`; with the same data
-  // and (usually) the same Code 128 subset-optimisation, the bar blocks
-  // come out at the same physical width. `fontSize` / `textMargin` sized
-  // to match pathway 1's HRI line (^A0N,46 inherited from body).
-  const bc = document.createElement('canvas');
-  JsBarcode(bc, value, {
-    format: 'CODE128',
-    displayValue: true,
-    fontSize: 46,
-    height: 200,
-    width: 6,
-    textMargin: 2,
-    margin: 0,
-    background: '#ffffff',
-    lineColor: '#000000',
-  });
-  const blob = await new Promise(r => bc.toBlob(r, 'image/png'));
-  const png  = await doc.embedPng(await blob.arrayBuffer());
-
-  const dpiScale = 72 / 300;     // pt per dot at 300 dpi rasterisation
-  page.drawImage(png, {
-    x: margin,                   // left-aligned at margin, matching pathway 1
-    y: margin,                   // anchor barcode to bottom margin
-    width:  bc.width  * dpiScale,
-    height: bc.height * dpiScale,
-  });
-
-  return doc.save();   // Uint8Array
-}
-
-async function regeneratePdf() {
-  try {
-    const w = parseFloat($('labelW').value) || (unit() === 'mm' ? 76 : 3);
-    const h = parseFloat($('labelH').value) || (unit() === 'mm' ? 51 : 2);
-    lastPdfBytes = await buildPdf({
-      title:    $('title').value,
-      body:     $('body').value,
-      value:    $('value').value,
-      widthIn:  valueToInches(w),
-      heightIn: valueToInches(h),
-    });
-    if (lastPdfUrl) URL.revokeObjectURL(lastPdfUrl);
-    lastPdfUrl = URL.createObjectURL(new Blob([lastPdfBytes], { type: 'application/pdf' }));
-    $('pdfPreview').src = lastPdfUrl;
-    setText('pdfMeta', `${lastPdfBytes.byteLength.toLocaleString()} bytes`);
-  } catch (e) {
-    log('PDF build error: ' + e.message, 'err');
-  }
-}
-
-// =============================================================================
-// Pathway 2: PDF → ZPL via Browser Print helper conversion
-// =============================================================================
-async function convertViaHelper() {
-  if (!zebra) { log('No printer selected.', 'err'); return; }
-  if (!lastPdfBytes) await regeneratePdf();
-  const featureKey = $('featureKey').value.trim();
-  if ($('rememberKey').checked) localStorage.setItem('zebraFeatureKey', featureKey);
-
-  setText('helperStatus', 'Converting via helper…');
-  try {
-    const blob = new Blob([lastPdfBytes], { type: 'application/pdf' });
-    const t0 = performance.now();
-    const zpl = await zebra.getConvertedResource(blob, {
-      toFormat: 'zpl',
-      fromFormat: 'pdf',
-      ...(featureKey ? { featureKey } : {}),
-    });
-    const dt = (performance.now() - t0).toFixed(0);
-
-    $('zplHelper').value = zpl;
-    setText('zplHelperSize', zpl.length.toLocaleString());
-    setText('helperStatus', `${zpl.length.toLocaleString()} chars ZPL, ${dt} ms`, 'ok');
-    $('printHelper').disabled = !device;
-  } catch (e) {
-    const msg = (e && e.message) || String(e);
-    setText('helperStatus', 'Error: ' + msg, 'err');
-    log('helper conversion: ' + msg + (msg.toLowerCase().includes('license') || msg.toLowerCase().includes('key')
-        ? '  ← typically means the PDF feature key is missing or invalid' : ''), 'err');
-  }
-}
-
-// =============================================================================
-// Print actions — both pathways go through device.send + a status check
-// =============================================================================
-async function printZpl(zpl, label) {
-  if (!device) { log('No printer.', 'err'); return; }
-  if (!zpl)    { log('Nothing to print for ' + label, 'warn'); return; }
-  try {
-    const t0 = performance.now();
-    await devSend(device, zpl);
-    const dt = (performance.now() - t0).toFixed(0);
-    log(`${label}: sent ${zpl.length.toLocaleString()} bytes in ${dt} ms`, 'ok');
-    // Status read after print (small delay so the printer has had a moment).
-    setTimeout(refreshStatus, 350);
-  } catch (e) {
-    log(`${label} failed: ` + (e.message || e), 'err');
-    setTimeout(refreshStatus, 350);
-  }
-}
-
-$('printDirect').addEventListener('click', () => printZpl($('zplDirect').value, 'Direct ZPL'));
-$('printHelper').addEventListener('click', () => printZpl($('zplHelper').value, 'PDF→helper→ZPL'));
-$('convertHelper').addEventListener('click', convertViaHelper);
-$('downloadPdf').addEventListener('click', () => {
-  if (!lastPdfBytes) return;
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob([lastPdfBytes], { type: 'application/pdf' }));
-  a.download = 'label.pdf';
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-});
-
-// =============================================================================
-// Custom ZPL — paste arbitrary ZPL and send it directly to the printer.
-// =============================================================================
-$('printCustomZpl').addEventListener('click', () => {
-  const zpl = $('customZpl').value;
-  if (!zpl.trim()) {
-    setText('customZplStatus', 'Empty ZPL — nothing to print.', 'warn');
+function setPdfMessage(text, kind /* 'info' | 'warn' | 'err' */) {
+  const msg = $('pdfMessage');
+  const iframe = $('pdfPreview');
+  if (text == null) {
+    msg.style.display = 'none';
+    iframe.style.display = '';
     return;
   }
-  setText('customZplStatus', '');
-  printZpl(zpl, 'Custom ZPL');
-});
+  msg.textContent = text;
+  msg.style.display = '';
+  iframe.style.display = 'none';
+  msg.style.color = kind === 'err' ? '#a40000'
+                  : kind === 'warn' ? '#9a6700'
+                  : '#444';
+}
+
+function clearPdf() {
+  if (lastPdfUrl) { URL.revokeObjectURL(lastPdfUrl); lastPdfUrl = null; }
+  lastPdfBytes = null;
+  $('pdfPreview').src = 'about:blank';
+  $('printPdf').disabled = true;
+  const dl = $('downloadPdf');
+  dl.removeAttribute('href');
+  dl.style.pointerEvents = 'none';
+  dl.style.opacity = '0.45';
+}
+
+function showPdf(bytes) {
+  clearPdf();
+  lastPdfBytes = bytes;
+  const blob = new Blob([bytes], { type: 'application/pdf' });
+  lastPdfUrl = URL.createObjectURL(blob);
+  $('pdfPreview').src = lastPdfUrl;
+  const dl = $('downloadPdf');
+  dl.href = lastPdfUrl;
+  dl.style.pointerEvents = '';
+  dl.style.opacity = '';
+  $('printPdf').disabled = !device;
+  setPdfMessage(null);
+}
+
+function markZplDirty() {
+  clearPdf();
+  setPdfMessage('ZPL changed — click Generate PDF to refresh the preview.', 'info');
+}
+
+async function generatePdfFromZpl() {
+  if (!device) { setPdfMessage('Select a printer first.', 'warn'); return; }
+  if (!pdfPreviewSupported) {
+    setPdfMessage('PDF preview unavailable. This requires browser-print-shim.py with zpl2pdf installed (see README §5b).', 'warn');
+    return;
+  }
+  const zpl = $('zpl').value;
+  const dpi = (lastDetected && lastDetected.dpi) || 203;
+  setPdfMessage('Rendering…', 'info');
+  $('generatePdf').disabled = true;
+  try {
+    const r = await fetch(`http://127.0.0.1:9100/zpl-to-pdf?dpi=${encodeURIComponent(dpi)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain' },
+      body: zpl,
+    });
+    if (!r.ok) {
+      const errText = await r.text();
+      setPdfMessage(`Conversion failed (HTTP ${r.status}):\n${errText}`, 'err');
+      log(`zpl-to-pdf failed: ${r.status} ${errText}`, 'err');
+      return;
+    }
+    const buf = new Uint8Array(await r.arrayBuffer());
+    showPdf(buf);
+    log(`zpl-to-pdf: ${zpl.length} chars ZPL → ${buf.length} bytes PDF`);
+  } catch (e) {
+    setPdfMessage(`Conversion failed: ${e.message || e}`, 'err');
+    log(`zpl-to-pdf failed: ${e}`, 'err');
+  } finally {
+    $('generatePdf').disabled = !device || !pdfPreviewSupported;
+  }
+}
+
+function regenerateDefaultZpl() {
+  if (!lastDetected) return;
+  const zpl = defaultZpl({ dpi: lastDetected.dpi || 300 });
+  $('zpl').value = zpl;
+  defaultZplSnapshot = zpl;
+  if (pdfPreviewSupported) {
+    setPdfMessage(null);
+    generatePdfFromZpl();
+  }
+  // else: leave the existing "PDF preview unavailable" message in place.
+}
+
+function maybeRegenerateDefaultZpl() {
+  // Called after a printer-change. If the textarea hasn't been edited
+  // (still matches the previous default), it's safe to overwrite. If
+  // the user has edits, leave them — show a hint instead.
+  if (!lastDetected) return;
+  if ($('zpl').value === defaultZplSnapshot || defaultZplSnapshot === '') {
+    regenerateDefaultZpl();
+  } else {
+    log('Printer changed — current ZPL has user edits. ' +
+        'Click Reset to default to use new dimensions.');
+  }
+}
 
 // =============================================================================
 // Upload PDF — select a PDF file, run it through the helper's PDF→ZPL
-// conversion, send the result. Same pipeline as pathway 2's helper conversion;
-// reuses the PDF feature key from that section.
+// conversion, send the result.
 // =============================================================================
 $('customPdfFile').addEventListener('change', () => {
   const file = $('customPdfFile').files[0];
@@ -1369,23 +1031,69 @@ $('printCustomPdf').addEventListener('click', async () => {
   }
 });
 
+
 // =============================================================================
-// Wire up controls — regenerate everything on input change
+// ZPL textarea + PDF preview event listeners
 // =============================================================================
-async function regenAll() {
-  regenerateDirect();
-  await regeneratePdf();
-  // Pathway-2 textarea becomes stale on input change; clear so the user has to
-  // re-convert (the helper call is heavier than direct ZPL — don't auto-trigger).
-  $('zplHelper').value = '';
-  setText('zplHelperSize', '0');
-  $('printHelper').disabled = true;
-}
-['title', 'body', 'value', 'density', 'labelW', 'labelH'].forEach(id => {
-  const el = $(id);
-  el.addEventListener('input', regenAll);
-  el.addEventListener('change', regenAll);
+$('zpl').addEventListener('input', markZplDirty);
+
+$('printZpl').addEventListener('click', async () => {
+  if (!device) return;
+  const zpl = $('zpl').value;
+  if (!zpl.trim()) { log('Empty ZPL — nothing to print', 'warn'); return; }
+  $('printZpl').disabled = true;
+  setText('zplStatus', 'Sending…');
+  try {
+    await devSend(device, zpl);
+    setText('zplStatus', `Sent ${zpl.length} chars`);
+    log(`print: device.send ${zpl.length} chars`);
+    setTimeout(refreshStatus, 350);
+  } catch (e) {
+    setText('zplStatus', `Failed: ${e}`, 'err');
+    log(`print failed: ${e}`, 'err');
+  } finally {
+    $('printZpl').disabled = !device;
+  }
 });
+
+$('generatePdf').addEventListener('click', generatePdfFromZpl);
+
+$('resetZpl').addEventListener('click', (ev) => {
+  ev.preventDefault();
+  regenerateDefaultZpl();
+});
+
+$('printPdf').addEventListener('click', async () => {
+  if (!device || !lastPdfBytes) return;
+  $('printPdf').disabled = true;
+  setText('pdfStatus', 'Sending…');
+  try {
+    const blob = new Blob([lastPdfBytes], { type: 'application/pdf' });
+    await convertAndSendFileViaSdk(blob);
+    setText('pdfStatus', `Sent ${lastPdfBytes.length} bytes`);
+    log(`print pdf: ${lastPdfBytes.length} bytes via convertAndSendFile`);
+    setTimeout(refreshStatus, 350);
+  } catch (e) {
+    const hint = /license|key/i.test(String(e))
+      ? ' (Zebra\'s official helper requires a PDF feature key; the shim ignores it.)' : '';
+    setText('pdfStatus', `Failed: ${e}${hint}`, 'err');
+    log(`print pdf failed: ${e}`, 'err');
+  } finally {
+    $('printPdf').disabled = !device || !lastPdfBytes;
+  }
+});
+
+// Wrap the SDK's callback-style convertAndSendFile in a Promise. The
+// helper auto-detects the input format from the blob's MIME type, runs
+// the configured PDF→ZPL conversion (Zebra's licensed converter on
+// Windows/macOS, or the shim's Ghostscript pipeline on Linux), and
+// sends the resulting ZPL to the device.
+function convertAndSendFileViaSdk(blob) {
+  const featureKey = (($('featureKey') && $('featureKey').value) || '').trim();
+  return new Promise((res, rej) => {
+    device.convertAndSendFile(blob, res, rej, { featureKey });
+  });
+}
 
 // =============================================================================
 // PDF feature key default — pre-populated for convenience.
@@ -1431,8 +1139,9 @@ const DEFAULT_FEATURE_KEY =
 // Boot
 // =============================================================================
 (async function init() {
-  regenerateDirect();
-  await regeneratePdf();
+  // Show initial unavailable message — will be replaced by refreshHelperInfo
+  // if pdfPreviewSupported is confirmed, or left in place if not.
+  setPdfMessage('PDF preview will appear here once a printer is selected.', 'info');
   await discover();
 })();
 </script>
