@@ -22,8 +22,10 @@ the conversation.
 - **Target printers:** any Zebra ZPL printer the Browser Print helper /
   shim can see. Developed against a GX430t (300 dpi); should also cover
   GX420t / ZD220 (203 dpi), ZD/ZT 600 dpi variants, etc. The page reads
-  the head dpi and currently-loaded label size from the printer on
-  selection (see §8b) and lets the user override either before printing.
+  the head density and currently-loaded label size from the printer on
+  selection (see §8b), defaults to whichever display unit the printer
+  itself reports in (inches if dpi-only, millimetres if `N/mm` was
+  found), and lets the user override either before printing.
 - **Client OSes:** primarily Windows; should also work on Ubuntu and macOS.
 - **Browser:** Chrome.
 - **Hard requirements:**
@@ -617,20 +619,76 @@ parallel through the SDK queue:
 | `getConfiguration()` | `^XA^HH^XZ` | `printWidth` (dots), `labelLength` (dots), `RESOLUTION` field, firmware |
 | `getInfo()`          | `~hi\r\n` | model string (e.g. `"GX430t-300dpi"`) |
 
-…then resolves dpi by escalating fallbacks:
+…then resolves density by escalating fallbacks. Density is tracked in
+both representations — `densityDpi` (dots-per-inch, snapped to standard
+Zebra labelled values) and `densityDpm` (dots-per-millimetre, only
+populated when the printer reported `N/mm` directly):
 
 1. `head.resolution.in_dpi` SGD value
-2. `cfg.settings.RESOLUTION` parsed for leading integer (e.g.
-   `"300 8/mm FULL"` → 300)
-3. `info.model` regex `/(\d+)\s*dpi/i` (e.g. `"GX430t-300dpi"` → 300)
-4. `device.host_resolution` SGD as a last-resort round-trip
+2. `cfg.settings.RESOLUTION` parsed by `parseDensity` (handles three
+   shapes — bare integer `"300"`, leading-integer-is-dpi
+   `"203 8/mm FULL"`, and the variant where the leading integer is
+   *not* dpi, e.g. `"1280 12/MM FULL"` where the only reliable signal
+   is the `12/MM` token). When `N/mm` is found, both `dpi` and `dpm`
+   are returned; otherwise just `dpi`.
+3. `info.model` regex `/(\d+)\s*dpi/i` — model string `"GX430t-300dpi"`
+   yields 300.
+4. `device.host_resolution` SGD as a last-resort round-trip.
 
 The GX430t we tested doesn't expose `head.resolution.in_dpi` *or* a
 `RESOLUTION` field; detection succeeds on fallback 3 via the model
-string. Width and height are computed as `printWidth / dpi` and
-`labelLength / dpi`. Manual edits to any of the three inputs are sticky
-— a re-detection won't stomp on a user override; reselect the printer in
-the dropdown to wipe overrides and detect afresh.
+string. Other firmware (e.g. some ZD/ZT) hits fallback 2 and yields
+`densityDpm` exactly. Width and height are filled from `printWidth` /
+`labelLength` (dots) via `dotsToValue()` in the user's current display
+unit. Manual edits to any of the three inputs (density, width, height)
+are sticky — a re-detection won't stomp on a user override; reselect
+the printer in the dropdown to wipe overrides and detect afresh.
+
+#### Display units (in / mm) and the toggle
+
+The page can show label dimensions in either inches or millimetres. The
+current unit drives:
+
+- the suffix shown after the width / height inputs (`in` / `mm`),
+- the *resolution* field's units and datalist (`dpi` with options
+  `152 / 203 / 300 / 600`, or `dots/mm` with options `6 / 8 / 12 / 24`),
+- the Printer info card's Resolution row (`300 dpi (12 dots/mm)` or
+  `12 dots/mm (300 dpi)` — primary in current unit, other in parens
+  when known),
+- the wording of the detected-summary line.
+
+**Default behaviour is honest to the printer.** If `^HH RESOLUTION`
+yields an exact `densityDpm` and the user hasn't already toggled the
+unit this session, the page auto-switches to mm so the displayed
+numbers match what the printer reports. The auto-switch is *not*
+persisted — a fresh page load starts at inches and re-evaluates from
+detection. A user toggle sets a session-only `userOverrodeUnit` flag
+that disables auto-switching for the rest of the session.
+
+**Toggling preserves physical output, not the inch/mm ratio.** Width
+and height conversions go via *dots*, not via the naïve `× 25.4`
+factor:
+
+```
+Inches mode:  3.00 in × 300 dpi  = 900 dots
+Toggle to mm: 900 dots ÷ 12 dpm  = 75.0 mm   ← same dots, same physical output
+              (NOT 3.00 × 25.4   = 76.2 mm × 12 dpm = 914 dots — different!)
+```
+
+This matters because Zebra's labelled dpi (`300`) and the underlying
+dot density (`12 dots/mm = 304.8 dpi`) round differently — going
+through the inch/mm ratio loses ~1.6%. Going through dots, the toggle
+is a pure display change. Density values themselves convert via the
+standard mapping (`6 ↔ 152`, `8 ↔ 203`, `12 ↔ 300`, `24 ↔ 600`); for
+non-standard densities, computed via `× 25.4` (lossy by ≤1.6% in the
+unusual case).
+
+The two parser helpers documented in code:
+
+- `parseDensity(s)` — returns `{ dpi, dpm }` from any printer-reported
+  density string. The tests in code cover all three observed shapes.
+- `parseSgdValue(raw)` — strips STX/ETX framing and surrounding quotes
+  from raw SGD responses.
 
 Detection has a longer per-query timeout (5 s, single attempt) than
 status reads. Two reasons:
@@ -799,3 +857,4 @@ For production this should be vendored next to `pdf-lib.min.js`.
 | 17 | Tracked spurious red "Offline" pills + indefinite "querying…" on the status row to the SDK's STX/ETX framing check on `~HS` responses (`offline = true` whenever the trimmed body doesn't *both* start with `0x02` and end with `0x03`). The actual `~HS` reply is three STX/ETX-framed records flushed back-to-back; the shim's old `/read` returned after the first `select()` fired, often capturing only the first frame. Fixed at the shim layer with `_drain_until_quiet_fd` / `_drain_until_quiet_sock` (drain until 150 ms of silence, 1500 ms hard cap). Belt-and-braces on the page: race each `getStatus` against a 500 ms timeout, retry up to 3× silently on offline / timeout / error, surface the truthful end state. ~2.3 s worst case for both auto-fire and manual click. |
 | 18 | Generalised the prototype off the GX430t. Resolution dropdown → numeric input + datalist; new width / height inputs in inches. On device selection the page now fires `head.resolution.in_dpi` SGD + `^XA^HH^XZ` + `~hi` in parallel through the SDK queue, then resolves dpi by escalating fallbacks (canonical SGD → `cfg.settings.RESOLUTION` → model-string regex → `device.host_resolution` SGD). The GX430t we tested doesn't expose the canonical SGD or a RESOLUTION field; detection succeeds on the model-string fallback (`"GX430t-300dpi"` → 300). User edits are sticky — re-detection won't overwrite them; reselect the printer to wipe overrides and detect afresh. Detection has its own 5 s per-query timeout (separate from the status budget) because `getSGD` uses `sendThenReadAllAvailable`, which recurses until `/read` returns empty — costing ~2.25 s per SGD call even on a fast printer. |
 | 19 | Promoted the page from "demo with hidden detection" to "general Zebra setup / troubleshooting tool". Added a Printer info section (model / firmware / Link-OS / dpi / connection / UID) populated from the same detection cycle that fills the geometry inputs; merged the previously-separate Status section into it (status row spans the full info-grid width with a thin underline) and replaced the two refresh buttons with a single ↻ Refresh that re-runs status + detection together. New Diagnostics section with eight preset commands (`~hi`, `~HS`, `^HH`, `^HZa`, `getvar "*"`, `^WC`, `~JC`, `~JR`) plus a free-form custom-command textarea; presets are tagged `read` or `write` so query commands wait for a response and fire-and-forget commands skip the read. Raw-response viewer shows control bytes as `<STX>`/`<ETX>`/etc. with a 16-byte/row hex dump beneath. Diagnostics deliberately bypass the SDK's queued Request machinery (uses `device.send` / `device.read` directly) for predictable single-shot behaviour and to avoid contending with the SDK's auto-fired `configTimeout` cycle. Light visual rework: subtle 1 px rules between adjacent non-pathway sections, generous vertical margin, info card uses a grid with monospace values. |
+| 20 | Caught that the existing dpi parser dropped `"1280 12/MM FULL"` because it grabbed the leading integer (head width in dots, not dpi) and the "1280" failed the range gate. Replaced `parseDpiCandidate` with `parseDensity` returning both `{ dpi, dpm }` — when an `N/mm` token is present the page now also captures the *exact* dots-per-mm density. Added a unit toggle (in / mm) for the Label-geometry section: changing units flips the resolution-field label between `dpi` and `dots/mm`, swaps its datalist (`152/203/300/600` ↔ `6/8/12/24`), updates the suffix on the width/height inputs, and reflows the Printer-info card's Resolution row to match (with the other representation in parens when known). Page defaults to whatever the printer reports — auto-switches to mm on detection when `densityDpm` is captured, *not* persisted (no localStorage). User toggling sets a session-only `userOverrodeUnit` flag so re-selection of the same printer doesn't bounce them back. The toggle converts width/height via *dots*, not via the naïve `× 25.4` factor — so the toggle preserves physical print output exactly even when the labelled dpi (300) and underlying density (12/mm = 304.8 dpi) round differently. Density itself converts via the standard `6 ↔ 152`, `8 ↔ 203`, `12 ↔ 300`, `24 ↔ 600` mapping; non-standard densities go through `× 25.4` (lossy by ≤1.6% in the unusual case). |

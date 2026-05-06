@@ -101,23 +101,25 @@
 <section>
   <h2>Label geometry</h2>
   <div class="row">
-    <label>Resolution:
-      <input id="dpi" type="number" min="100" max="600" step="1" value="300"
-             list="dpi-options" style="width: 4.5em"> dpi
+    <label>Units:
+      <select id="unit">
+        <option value="in" selected>inches</option>
+        <option value="mm">millimetres</option>
+      </select>
     </label>
-    <datalist id="dpi-options">
-      <option value="152"></option>
-      <option value="203"></option>
-      <option value="300"></option>
-      <option value="600"></option>
-    </datalist>
+    <label>Resolution:
+      <input id="density" type="number" min="100" max="1200" step="1" value="300"
+             list="density-options" style="width: 4.5em">
+      <span class="density-unit-label">dpi</span>
+    </label>
+    <datalist id="density-options"></datalist>
     <label>Width:
       <input id="labelW" type="number" min="0.25" max="12" step="0.05" value="3.00"
-             style="width: 4.5em"> in
+             style="width: 4.5em"> <span class="unit-label">in</span>
     </label>
     <label>Height:
       <input id="labelH" type="number" min="0.25" max="24" step="0.05" value="2.00"
-             style="width: 4.5em"> in
+             style="width: 4.5em"> <span class="unit-label">in</span>
     </label>
     <span id="detectHint" class="muted" style="font-size: 0.9em"></span>
   </div>
@@ -457,12 +459,165 @@ $('refreshPrinter').addEventListener('click', () => {
 // rejects `^HH`. We log and fall back to whatever's already in the inputs;
 // no red pill (this is best-effort, not a status check).
 
-const inputEdited = { dpi: false, labelW: false, labelH: false };
-['dpi', 'labelW', 'labelH'].forEach(id => {
+const inputEdited = { density: false, labelW: false, labelH: false };
+['density', 'labelW', 'labelH'].forEach(id => {
   // Mark "user-edited" so detection won't overwrite. Cleared at the start
   // of each detection run.
   $(id).addEventListener('input', () => { inputEdited[id] = true; });
 });
+
+// Density state. Tracked in *both* representations so the page can do exact
+// integer math in mm mode whenever the printer reported in dots/mm.
+//   densityDpi — what the printer would call its dpi (snapped to standard
+//                Zebra labelled values: 152/203/300/600)
+//   densityDpm — exact dots-per-mm; only populated when the printer reported
+//                "N/mm" directly. Cleared when the user manually edits the
+//                density input to something inconsistent with the old dpm.
+let densityDpi = 300;
+let densityDpm = null;
+
+// Unit conversions between dpi (dots-per-inch) and dpm (dots-per-mm).
+// Standard Zebra densities are mapped exactly; uncommon ones are computed.
+const STANDARD_DPI_BY_DPM = { 6: 152, 8: 203, 12: 300, 24: 600 };
+const STANDARD_DPM_BY_DPI = { 152: 6, 203: 8, 300: 12, 600: 24 };
+function dpmToDpi(dpm) { return STANDARD_DPI_BY_DPM[dpm] || Math.round(dpm * 25.4); }
+function dpiToDpm(dpi) { return STANDARD_DPM_BY_DPI[dpi] || (dpi / 25.4); }
+
+// Unit toggle: 'in' or 'mm'. Drives every unit-derived label and the
+// conversion math. NOT persisted across page refreshes — instead the
+// session-only `userOverrodeUnit` flag tracks whether the user has made
+// an explicit choice (so detection's auto-switch only fires the first
+// time, not on every printer reselection).
+function unit() { return $('unit').value; }
+let userOverrodeUnit = false;
+let _lastUnit = unit();
+
+// Refresh internal density state from whatever's currently in the input.
+// Called both when the user types and after programmatic value changes.
+function syncDensityFromInput() {
+  const v = parseFloat($('density').value);
+  if (!Number.isFinite(v) || v <= 0) return;
+  if (unit() === 'mm') {
+    densityDpm = v;
+    densityDpi = dpmToDpi(v);
+  } else {
+    densityDpi = v;
+    // If the user typed a dpi that doesn't match what dpmToDpi(densityDpm)
+    // would produce, the old dpm correlation is stale — clear it.
+    if (densityDpm != null && dpmToDpi(densityDpm) !== v) densityDpm = null;
+  }
+}
+$('density').addEventListener('input', syncDensityFromInput);
+
+// dots ↔ display-value conversions. mm uses dpm directly when known
+// (exact integer math); otherwise falls back through dpi × 25.4.
+function valueToDots(value) {
+  if (!Number.isFinite(value)) return 0;
+  if (unit() === 'mm') return Math.round(value * (densityDpm || densityDpi / 25.4));
+  return Math.round(value * densityDpi);
+}
+function dotsToValue(dots) {
+  if (!Number.isFinite(dots)) return 0;
+  if (unit() === 'mm') return densityDpm ? dots / densityDpm : dots * 25.4 / densityDpi;
+  return dots / densityDpi;
+}
+// PDF works in inches/points regardless of UI unit.
+function valueToInches(value) { return unit() === 'mm' ? value / 25.4 : value; }
+function formatDisplayValue(v) { return unit() === 'mm' ? v.toFixed(1) : v.toFixed(2); }
+// Density values render as integers when they round cleanly (300 dpi, 12 dpm),
+// one decimal for unusual densities computed from N×25.4.
+function formatDensityValue(v) { return Number.isInteger(v) ? String(v) : v.toFixed(1); }
+
+// Apply unit-dependent attributes to inputs / labels / datalists. Called
+// whenever the unit changes (auto or manual).
+function applyUnitToInputs() {
+  const u = unit();
+  document.querySelectorAll('.unit-label').forEach(el => el.textContent = u);
+
+  const wEl = $('labelW'), hEl = $('labelH');
+  if (u === 'mm') {
+    wEl.step = hEl.step = '0.5';
+    wEl.min  = hEl.min  = '6';
+    wEl.max  = '300'; hEl.max = '600';
+  } else {
+    wEl.step = hEl.step = '0.05';
+    wEl.min  = hEl.min  = '0.25';
+    wEl.max  = '12';  hEl.max = '24';
+  }
+
+  const dEl = $('density');
+  const dLabel = document.querySelector('.density-unit-label');
+  const dList  = $('density-options');
+  if (u === 'mm') {
+    dEl.min = '4'; dEl.max = '40'; dEl.step = '1';
+    dLabel.textContent = 'dots/mm';
+    dList.innerHTML = '<option value="6"></option><option value="8"></option>' +
+                      '<option value="12"></option><option value="24"></option>';
+  } else {
+    dEl.min = '100'; dEl.max = '1200'; dEl.step = '1';
+    dLabel.textContent = 'dpi';
+    dList.innerHTML = '<option value="152"></option><option value="203"></option>' +
+                      '<option value="300"></option><option value="600"></option>';
+  }
+}
+
+// Switch unit (manual or auto). Width / height conversions go via *dots*
+// rather than the naïve ×25.4 factor, so the toggle preserves the actual
+// number of dots in the ZPL output (and therefore the physical print size)
+// even when the dpi-vs-dpm representations round differently — e.g.
+// 3.00 in × 300 dpi = 900 dots; the equivalent in mm is 75.0 mm × 12 dpm
+// = 900 dots, NOT 76.2 mm × 12 dpm = 914 dots. Density conversions go
+// via the standard dpi/dpm mapping.
+function switchUnit(newUnit, reason) {
+  if (newUnit === _lastUnit) return;
+
+  // Capture dots in the *old* unit before switching, so dotsToValue below
+  // can reproject them in the new unit.
+  const w = parseFloat($('labelW').value);
+  const h = parseFloat($('labelH').value);
+  const widthDots  = Number.isFinite(w) ? valueToDots(w) : null;
+  const heightDots = Number.isFinite(h) ? valueToDots(h) : null;
+
+  // Density is intrinsic to the printer, not the label — convert via the
+  // standard dpi↔dpm mapping (no dots involved).
+  const d = parseFloat($('density').value);
+  const newDensity = Number.isFinite(d)
+    ? (_lastUnit === 'in' ? dpiToDpm(d) : dpmToDpi(d))
+    : null;
+
+  // Flip the unit. Everything below uses the new unit + new density state.
+  $('unit').value = newUnit;
+  _lastUnit = newUnit;
+  applyUnitToInputs();
+  if (newDensity != null) $('density').value = formatDensityValue(newDensity);
+  syncDensityFromInput();
+
+  if (widthDots  != null) $('labelW').value = formatDisplayValue(dotsToValue(widthDots));
+  if (heightDots != null) $('labelH').value = formatDisplayValue(dotsToValue(heightDots));
+
+  // Reflow the printer-info card's Resolution row to the new unit.
+  updateInfoResolution();
+
+  if (reason) log(`Switching display to ${newUnit} (${reason}).`);
+}
+
+// One-shot auto-switch to mm. Fires from detection when the printer reports
+// in dots/mm AND the user hasn't already toggled the unit themselves this
+// session. Not persisted — a new page load re-evaluates from detection.
+function maybeAutoSwitchUnitToMm(reason) {
+  if (unit() === 'mm') return;
+  if (userOverrodeUnit) return;
+  switchUnit('mm', reason);
+}
+
+$('unit').addEventListener('change', () => {
+  userOverrodeUnit = true;
+  switchUnit(unit());
+  regenAll();
+});
+
+// Initial setup: populate datalist + labels for the default (inches).
+applyUnitToInputs();
 
 function parseSgdValue(raw) {
   if (raw == null) return '';
@@ -475,16 +630,46 @@ function parseSgdValue(raw) {
   return s.trim();
 }
 
-// Pull a plausible dpi out of any string. SGDs return the bare integer
-// (`"203"`); the ^HH RESOLUTION field uses a longer form like
-// `"300 8/mm FULL"`. The leading integer is always the dpi in both cases,
-// so a single regex covers both shapes.
-function parseDpiCandidate(s) {
+// Parse a printer density string into { dpi, dpm }. Zebra reports density
+// in three observed shapes; we try the most reliable one first.
+//
+//   "300"                 — bare SGD response (dpi only)
+//   "203 8/mm FULL"       — common RESOLUTION form: leading integer = dpi,
+//                           followed by the equivalent N/mm density
+//   "1280 12/MM FULL"     — RESOLUTION variant where the leading integer is
+//                           the head width in dots, NOT the dpi. Only the
+//                           "12/MM" token tells the truth here.
+//
+// Strategy:
+//   - Prefer "N/mm" — always physically meaningful (dots per millimetre).
+//     Both `dpm` (exact) and `dpi` (snapped to Zebra's labelled value:
+//     6/mm=152, 8/mm=203, 12/mm=300, 24/mm=600) are returned.
+//   - Fall back to the leading integer (gives dpi only; dpm = null).
+//
+// `dpm` matters because in mm-mode the page can do exact integer math
+// (75 mm × 12 dpm = 900 dots) instead of round-tripping through the
+// snapped dpi (75 × 300 / 25.4 = 885.83 → 886, off by 14 dots).
+function parseDensity(s) {
   if (!s) return null;
-  const m = String(s).match(/\d+/);
+  const str = String(s);
+
+  const dotsPerMm = str.match(/(\d+)\s*\/\s*mm/i);
+  if (dotsPerMm) {
+    const dpm = parseInt(dotsPerMm[1], 10);
+    if (Number.isFinite(dpm) && dpm > 0) {
+      // Standard Zebra densities — N×25.4 doesn't round cleanly (12/mm=304.8,
+      // 24/mm=609.6) but Zebra always *labels* these as 300 / 600 dpi.
+      const standard = { 6: 152, 8: 203, 12: 300, 24: 600 };
+      const dpi = standard[dpm] || Math.round(dpm * 25.4);
+      if (dpi >= 50 && dpi <= 1200) return { dpi, dpm };
+    }
+  }
+
+  const m = str.match(/\d+/);
   if (!m) return null;
   const v = parseInt(m[0], 10);
-  return (Number.isFinite(v) && v >= 50 && v <= 1200) ? v : null;
+  if (!Number.isFinite(v) || v < 50 || v > 1200) return null;
+  return { dpi: v, dpm: null };
 }
 
 // Detection has its own (generous) per-query timeout. Two reasons:
@@ -537,21 +722,23 @@ async function detectPrinterCapabilities() {
   //   3. info.model regex          (from ~hi)   — "…-300dpi" suffix, very common
   //   4. device.host_resolution SGD             — last-resort alternative
   let detectedDpi = null;
+  let detectedDpm = null;
   let dpiSource   = null;
 
   if (primaryDpiRes.status === 'fulfilled') {
-    const v = parseDpiCandidate(parseSgdValue(primaryDpiRes.value));
-    if (v != null) { detectedDpi = v; dpiSource = 'head.resolution.in_dpi SGD'; }
+    const d = parseDensity(parseSgdValue(primaryDpiRes.value));
+    if (d) { detectedDpi = d.dpi; detectedDpm = d.dpm; dpiSource = 'head.resolution.in_dpi SGD'; }
     else log(`Detect: head.resolution.in_dpi returned ${JSON.stringify(primaryDpiRes.value)} (unparseable / unsupported)`, 'warn');
   } else {
     log('Detect: head.resolution.in_dpi failed: ' + (primaryDpiRes.reason && primaryDpiRes.reason.message || primaryDpiRes.reason), 'warn');
   }
 
   if (detectedDpi == null && cfgRes.status === 'fulfilled' && cfgRes.value && cfgRes.value.settings) {
-    const v = parseDpiCandidate(cfgRes.value.settings.RESOLUTION);
-    if (v != null) {
-      detectedDpi = v; dpiSource = '^HH RESOLUTION';
-      log(`Detect: dpi from ^HH RESOLUTION = ${JSON.stringify(cfgRes.value.settings.RESOLUTION)} → ${v}`);
+    const d = parseDensity(cfgRes.value.settings.RESOLUTION);
+    if (d) {
+      detectedDpi = d.dpi; detectedDpm = d.dpm; dpiSource = '^HH RESOLUTION';
+      log(`Detect: dpi from ^HH RESOLUTION = ${JSON.stringify(cfgRes.value.settings.RESOLUTION)}` +
+          ` → ${d.dpi} dpi` + (d.dpm ? ` (${d.dpm} dots/mm exact)` : ''));
     } else if (cfgRes.value.settings.RESOLUTION) {
       log(`Detect: ^HH RESOLUTION present but unparseable: ${JSON.stringify(cfgRes.value.settings.RESOLUTION)}`, 'warn');
     }
@@ -560,6 +747,7 @@ async function detectPrinterCapabilities() {
   if (detectedDpi == null && infoRes.status === 'fulfilled' && infoRes.value && infoRes.value.model) {
     // Model strings look like "ZTC GX430t-300dpi" / "ZTC ZD420T-203dpi" /
     // "ZTC ZT411-600dpi". Match the trailing "Ndpi" / "N dpi" suffix.
+    // Doesn't carry a dpm — the model name is in dpi.
     const m = String(infoRes.value.model).match(/(\d+)\s*dpi/i);
     if (m) {
       const v = parseInt(m[1], 10);
@@ -579,8 +767,8 @@ async function detectPrinterCapabilities() {
       const raw = await withDetectTimeout(
         () => zebra.getSGD('device.host_resolution'),
         'getSGD(device.host_resolution)');
-      const v = parseDpiCandidate(parseSgdValue(raw));
-      if (v != null) { detectedDpi = v; dpiSource = 'device.host_resolution SGD'; }
+      const d = parseDensity(parseSgdValue(raw));
+      if (d) { detectedDpi = d.dpi; detectedDpm = d.dpm; dpiSource = 'device.host_resolution SGD'; }
       else log(`Detect: device.host_resolution returned ${JSON.stringify(raw)} (unparseable / unsupported)`, 'warn');
     } catch (e) {
       log('Detect: device.host_resolution failed: ' + (e.message || e), 'warn');
@@ -595,24 +783,40 @@ async function detectPrinterCapabilities() {
   }
 
   if (detectedDpi != null) {
-    if (!inputEdited.dpi) $('dpi').value = String(detectedDpi);
+    densityDpi = detectedDpi;
+    if (detectedDpm != null) densityDpm = detectedDpm;
     detected.push(`${detectedDpi} dpi (${dpiSource})`);
   }
 
+  // Auto-switch to mm BEFORE rendering anything into inputs, so the values
+  // we're about to write land in the right unit. Honest to what the
+  // printer reported; sticky for the session unless user toggles back.
+  if (detectedDpm != null) maybeAutoSwitchUnitToMm('printer reports density as dots/mm');
+
+  // Now write the detected density value into the input in the current unit
+  // (skip if the user has already typed something — sticky edit).
+  if (detectedDpi != null && !inputEdited.density) {
+    if (unit() === 'mm') {
+      $('density').value = formatDensityValue(densityDpm || dpiToDpm(densityDpi));
+    } else {
+      $('density').value = String(densityDpi);
+    }
+  }
+
+  // Unit-aware label for the detected dimension lines (read AFTER the
+  // possible auto-switch above so labels match the unit we'll display in).
+  const u = unit();
   if (cfgRes.status === 'fulfilled' && cfgRes.value) {
     const c = cfgRes.value;
-    // Use detected dpi if we have it; otherwise honour whatever's in the
-    // input (which may be the user's manual override or the 300 default).
-    const dpiForCalc = detectedDpi || parseFloat($('dpi').value) || 300;
     if (Number.isFinite(c.printWidth) && c.printWidth > 0 && !inputEdited.labelW) {
-      const w = c.printWidth / dpiForCalc;
-      $('labelW').value = w.toFixed(2);
-      detected.push(`${w.toFixed(2)}″ wide (PRINT WIDTH ${c.printWidth} dots)`);
+      const v = dotsToValue(c.printWidth);
+      $('labelW').value = formatDisplayValue(v);
+      detected.push(`${formatDisplayValue(v)} ${u} wide (PRINT WIDTH ${c.printWidth} dots)`);
     }
     if (Number.isFinite(c.labelLength) && c.labelLength > 0 && !inputEdited.labelH) {
-      const h = c.labelLength / dpiForCalc;
-      $('labelH').value = h.toFixed(2);
-      detected.push(`${h.toFixed(2)}″ tall (LABEL LENGTH ${c.labelLength} dots)`);
+      const v = dotsToValue(c.labelLength);
+      $('labelH').value = formatDisplayValue(v);
+      detected.push(`${formatDisplayValue(v)} ${u} tall (LABEL LENGTH ${c.labelLength} dots)`);
     }
     if (c.firmwareVersion) {
       log(`Detect: firmware=${c.firmwareVersion}` +
@@ -630,12 +834,13 @@ async function detectPrinterCapabilities() {
     setText('detectHint', 'Could not auto-detect — using current values', 'muted');
   }
 
-  // Push everything we learned into the elevated info panel.
+  // Push everything we learned into the elevated info panel. Resolution
+  // is rendered from the module-level density state (densityDpi / densityDpm)
+  // by updateInfoResolution(), so we don't pass it here explicitly.
   updatePrinterInfo({
     device,
     info:   infoRes.status === 'fulfilled' ? infoRes.value : null,
     config: cfgRes.status  === 'fulfilled' ? cfgRes.value  : null,
-    dpi:    detectedDpi,
   });
 }
 
@@ -649,7 +854,7 @@ function clearPrinterInfo() {
   INFO_FIELDS.forEach(id => setText(id, '—'));
 }
 
-function updatePrinterInfo({ device, info, config, dpi } = {}) {
+function updatePrinterInfo({ device, info, config } = {}) {
   if (device) {
     setText('info-connection', device.connection || '?');
     setText('info-uid',        device.uid || '?');
@@ -668,7 +873,29 @@ function updatePrinterInfo({ device, info, config, dpi } = {}) {
       setText('info-linkos', config.linkOSVersion);
     }
   }
-  if (dpi) setText('info-dpi', `${dpi} dpi`);
+  updateInfoResolution();
+}
+
+// Renders the Resolution row of the printer info card in the user's current
+// unit (primary), with the other representation in parentheses when known.
+// Called both from updatePrinterInfo (after detection) and from switchUnit
+// (so the row reflows when the user toggles the unit).
+function updateInfoResolution() {
+  if (densityDpi == null && densityDpm == null) {
+    setText('info-dpi', '—');
+    return;
+  }
+  const dpi = densityDpi;
+  const dpm = densityDpm;
+  if (unit() === 'mm') {
+    const dpmShown = dpm != null ? formatDensityValue(dpm)
+                                 : formatDensityValue(dpi / 25.4);
+    setText('info-dpi',
+      dpi != null ? `${dpmShown} dots/mm (${dpi} dpi)` : `${dpmShown} dots/mm`);
+  } else {
+    setText('info-dpi',
+      dpm != null ? `${dpi} dpi (${formatDensityValue(dpm)} dots/mm)` : `${dpi} dpi`);
+  }
 }
 
 // =============================================================================
@@ -787,8 +1014,8 @@ function setDiagEnabled(enabled) {
 //   body     46 dots   ≈ 11 pt Helvetica          (PDF: drawText size 11)
 //   barcode  ~200-dot bars + ~40-dot HRI line, ~840 dots wide (^BY module 6)
 //                                                  (PDF: 192 pt × ~55 pt)
-function buildDirectZpl({ title, body, value, dpi, widthIn, heightIn }) {
-  const pw = Math.round(widthIn * dpi), ll = Math.round(heightIn * dpi);
+function buildDirectZpl({ title, body, value, dpi, widthDots, heightDots }) {
+  const pw = widthDots, ll = heightDots;
   const scale = dpi / 300;
 
   const margin   = Math.round(50 * scale);
@@ -816,13 +1043,15 @@ function buildDirectZpl({ title, body, value, dpi, widthIn, heightIn }) {
   ].join('\n');
 }
 function regenerateDirect() {
+  const w = parseFloat($('labelW').value) || (unit() === 'mm' ? 76 : 3);
+  const h = parseFloat($('labelH').value) || (unit() === 'mm' ? 51 : 2);
   const zpl = buildDirectZpl({
-    title:    $('title').value,
-    body:     $('body').value,
-    value:    $('value').value,
-    dpi:      parseInt($('dpi').value, 10) || 300,
-    widthIn:  parseFloat($('labelW').value) || 3,
-    heightIn: parseFloat($('labelH').value) || 2,
+    title:      $('title').value,
+    body:       $('body').value,
+    value:      $('value').value,
+    dpi:        densityDpi,        // always in dpi for ^A0/^BY scaling
+    widthDots:  valueToDots(w),
+    heightDots: valueToDots(h),
   });
   $('zplDirect').value = zpl;
   setText('zplDirectSize', zpl.length.toLocaleString());
@@ -860,12 +1089,14 @@ async function buildPdf({ title, body, value, widthIn, heightIn }) {
 
 async function regeneratePdf() {
   try {
+    const w = parseFloat($('labelW').value) || (unit() === 'mm' ? 76 : 3);
+    const h = parseFloat($('labelH').value) || (unit() === 'mm' ? 51 : 2);
     lastPdfBytes = await buildPdf({
       title:    $('title').value,
       body:     $('body').value,
       value:    $('value').value,
-      widthIn:  parseFloat($('labelW').value) || 3,
-      heightIn: parseFloat($('labelH').value) || 2,
+      widthIn:  valueToInches(w),
+      heightIn: valueToInches(h),
     });
     if (lastPdfUrl) URL.revokeObjectURL(lastPdfUrl);
     lastPdfUrl = URL.createObjectURL(new Blob([lastPdfBytes], { type: 'application/pdf' }));
@@ -951,7 +1182,7 @@ async function regenAll() {
   setText('zplHelperSize', '0');
   $('printHelper').disabled = true;
 }
-['title', 'body', 'value', 'dpi', 'labelW', 'labelH'].forEach(id => {
+['title', 'body', 'value', 'density', 'labelW', 'labelH'].forEach(id => {
   const el = $(id);
   el.addEventListener('input', regenAll);
   el.addEventListener('change', regenAll);
