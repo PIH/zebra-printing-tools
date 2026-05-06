@@ -467,6 +467,29 @@ def _have_ghostscript():
     return shutil.which('gs') is not None
 
 
+def _zpl2pdf_path():
+    """Return the path to the bundled zpl2pdf binary for this platform, or
+    None if it isn't installed. Layout matches install-zpl2pdf.sh:
+    bin/<os>-<arch>/zpl2pdf[.exe].
+    """
+    import platform as _pl
+    here = os.path.dirname(os.path.abspath(__file__))
+    osname = {'Linux': 'linux', 'Darwin': 'osx', 'Windows': 'win'}.get(_pl.system())
+    if not osname:
+        return None
+    arch = {'x86_64': 'x64', 'amd64': 'x64', 'AMD64': 'x64',
+            'arm64': 'arm64', 'aarch64': 'arm64'}.get(_pl.machine())
+    if not arch:
+        return None
+    binname = 'zpl2pdf.exe' if osname == 'win' else 'zpl2pdf'
+    candidate = os.path.join(here, 'bin', f'{osname}-{arch}', binname)
+    return candidate if os.path.isfile(candidate) and os.access(candidate, os.X_OK) else None
+
+
+def _have_zpl2pdf():
+    return _zpl2pdf_path() is not None
+
+
 def _gs_version_str():
     try:
         return subprocess.check_output(['gs', '--version'], text=True, timeout=2).strip()
@@ -788,14 +811,15 @@ class Handler(BaseHTTPRequestHandler):
     # ---- handlers ----
 
     def handle_config(self):
-        # Advertise PDF→ZPL conversion if Ghostscript is available.
-        # api_level 4 is the level the SDK requires for convert/* endpoints.
+        # Advertise PDF→ZPL conversion if Ghostscript is available, and
+        # ZPL→PDF if zpl2pdf is bundled in bin/. api_level 4 is what the
+        # SDK requires for any /convert endpoint to be considered.
+        conv = {}
         if _have_ghostscript():
-            api = 4
-            conv = {'pdf': ['zpl']}
-        else:
-            api = 2
-            conv = {}
+            conv['pdf'] = ['zpl']
+        if _have_zpl2pdf():
+            conv['zpl'] = ['pdf']
+        api = 4 if conv else 2
         return self._send_json(200, {
             'version': SHIM_VERSION,
             'build_number': 0,
