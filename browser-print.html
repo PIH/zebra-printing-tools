@@ -107,12 +107,12 @@
 <section class="pathway">
   <h2>ZPL</h2>
   <p>
-    This is the ZPL that will be sent to the printer. The default below is
-    populated from the selected printer's detected dimensions; edit
-    <code>^PW</code> (print width, in dots) and <code>^LL</code> (label
-    length, in dots) to match your loaded media if they differ. Anything
-    else can be edited freely — pre-generated ZPL from the OpenMRS module
-    or another system can be pasted here directly.
+    This is the ZPL that will be sent to the printer. The default below
+    assumes a <b>3" × 2" label</b> (sized to the printer's detected DPI);
+    edit <code>^PW</code> (print width, in dots) and <code>^LL</code>
+    (label length, in dots) if your loaded media is different. Anything
+    else can be edited freely — pre-generated ZPL from the OpenMRS
+    module or another system can be pasted here directly.
   </p>
   <textarea id="zpl" rows="14" spellcheck="false"
             style="font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.92em"></textarea>
@@ -845,10 +845,18 @@ function setDiagEnabled(enabled) {
 // Default ZPL for the textarea
 // =============================================================================
 // Default ZPL written into the textarea on printer-select. Header / body /
-// barcode are now hard-coded — the previous form inputs are gone. Same
-// content the page emitted before; only widthDots / heightDots vary, from
-// detection. Whoever wants different content edits the textarea directly.
-function defaultZpl({ widthDots, heightDots }) {
+// barcode are now hard-coded — the previous form inputs are gone.
+//
+// Dimensions: hardcoded 3"×2" label scaled to the detected DPI. The
+// printer's reported printWidth / labelLength are NOT used here; those
+// are the print HEAD width and last-calibrated length, not the loaded
+// media size. Layout constants (font sizes, positions) were tuned for a
+// 3"×2" 300dpi label; using a wider ^PW would make the content look
+// left-shifted on the wider print area. Whoever needs a different size
+// edits ^PW / ^LL directly in the textarea.
+function defaultZpl({ dpi }) {
+  const widthDots = Math.round(3 * dpi);
+  const heightDots = Math.round(2 * dpi);
   return [
     '^XA',
     '^CI28',
@@ -949,10 +957,7 @@ async function generatePdfFromZpl() {
 
 function regenerateDefaultZpl() {
   if (!lastDetected) return;
-  const zpl = defaultZpl({
-    widthDots: lastDetected.widthDots,
-    heightDots: lastDetected.heightDots,
-  });
+  const zpl = defaultZpl({ dpi: lastDetected.dpi || 300 });
   $('zpl').value = zpl;
   defaultZplSnapshot = zpl;
   if (pdfPreviewSupported) {
