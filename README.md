@@ -1,8 +1,11 @@
 # Client-side label printing — prototype & findings
 
-A self-contained Chrome page (`browser-print.html`) that prints a 3"×2" label
+A self-contained Chrome page (`browser-print.html`) that prints a label
 (text + Code 128 barcode `A456123`) directly from the browser to a Zebra
-GX430t with no print dialog and no per-print user interaction.
+ZPL printer, with no print dialog and no per-print user interaction.
+Resolution and label dimensions are auto-detected from whichever printer
+the user picks — the prototype was developed against a GX430t but works
+unchanged on any GX/ZD/ZT/etc. that the Browser Print helper can see.
 
 This README captures both *how to run it* and *what we learned while
 designing it*, so the next person picking this up doesn't have to retrace
@@ -12,17 +15,21 @@ the conversation.
 
 ## 1. Goal & constraints
 
-- **Target printer:** Zebra GX430t (300 dpi). Should also work on a GX420t /
-  ZD220 (203 dpi) — the page exposes a dpi switch.
+- **Target printers:** any Zebra ZPL printer the Browser Print helper /
+  shim can see. Developed against a GX430t (300 dpi); should also cover
+  GX420t / ZD220 (203 dpi), ZD/ZT 600 dpi variants, etc. The page reads
+  the head dpi and currently-loaded label size from the printer on
+  selection (see §8b) and lets the user override either before printing.
 - **Client OSes:** primarily Windows; should also work on Ubuntu and macOS.
 - **Browser:** Chrome.
 - **Hard requirements:**
   - No print dialog.
   - No per-print user interaction (one-time setup is fine).
   - Printer remains usable by other applications on the same machine.
-- **Scope:** prototype an HTML page that prints a 3"×2" label with text and
-  a Code 128 barcode of `A456123`, exploring both ZPL-direct and PDF-input
-  pipelines.
+- **Scope:** prototype an HTML page that prints a label with text and a
+  Code 128 barcode of `A456123`, exploring both ZPL-direct and PDF-input
+  pipelines. Default geometry is 3"×2" but can be set to whatever stock
+  is loaded.
 - **Existing OpenMRS module behaviour:** server-side ZPL generation, then
   pushed to network printers over a raw TCP socket on port 9100. The
   client-side path needs a different transport but should reuse the same
@@ -279,8 +286,10 @@ Once one of those is running, the rest is the same:
    python3 -m http.server 8000
    # → http://localhost:8000/browser-print.html
    ```
-3. Open the page, pick the GX430t in the printer dropdown, exercise each
-   pathway. Watch the status pill after each print.
+3. Open the page, pick your printer in the dropdown (the page reads its
+   dpi and label dimensions on selection — see §8b — and pre-fills the
+   geometry inputs accordingly; override anything the printer reports
+   wrong), exercise each pathway. Watch the status pill after each print.
 
 ### 5a. Official Browser Print (Windows / macOS)
 
@@ -489,7 +498,10 @@ expectations.
 
 ## 7. ZPL primer (what the prototype emits)
 
-The label is 3" × 2" → 900 × 600 dots at 300 dpi (or 609 × 406 at 203 dpi).
+For a 3" × 2" label that's 900 × 600 dots at 300 dpi (or 609 × 406 at
+203 dpi). The page reads dpi, width, and height from inputs (auto-filled
+on device selection — see §8b) and scales `^PW` / `^LL` accordingly; the
+sample ZPL below shows the 300-dpi GX430t case.
 
 **Pathway 1 sample (layout matches what pathway 2 produces — same margins,
 font sizes, bottom-anchored barcode):**
@@ -534,6 +546,7 @@ form:
 and parses it into a `Zebra.Printer.Status` object with:
 
 - `isPrinterReady()` → boolean
+- `offline` → boolean (set when the response framing fails — see below)
 - `getMessage()` → human-readable description (e.g., "Ready to Print",
   "Head Open", "Paper Out")
 
@@ -548,6 +561,83 @@ race).
 `device.send` returning success only means *bytes were buffered to the
 helper*, not that the label printed. The post-print status read is what
 gives you the real "did it actually print" signal.
+
+### 8a. The "Offline" trap
+
+The Zebra SDK reports `offline = true` whenever the trimmed `~HS`
+response doesn't *both* start with STX (`0x02`) **and** end with ETX
+(`0x03`):
+
+```js
+function h(c){ return 2 !== c.charCodeAt(0)
+                   || 3 !== c.charCodeAt(c.length - 1) ? false : true; }
+// ...
+this.offline = !h(a.trim());
+```
+
+`~HS` actually returns three STX/ETX-framed records flushed back-to-back
+from the printer, and the SDK indexes flag positions across all three
+(e.g. char 43 is "head open" in the second record). So the helper has
+to capture *all three frames* in one `/read` body — if a `select()`
+returns the moment the first byte is available and the helper grabs
+just the first frame, the SDK then sees a body that ends on `\n`/`\r`
+or mid-stream, fails the framing check, and surfaces a red "Offline"
+pill even though the printer is fine.
+
+The shim's `/read` handlers therefore drain *until quiet*: after the
+first byte arrives, keep reading until 150 ms of silence (1500 ms
+hard cap), so multi-frame `~HS` (and `^HH`) replies land in one body.
+See `_drain_until_quiet_fd` / `_drain_until_quiet_sock` in
+`browser-print-shim.py` and the comment block in front of them.
+
+The page side adds belt-and-braces: each `getStatus` is raced against a
+500 ms per-attempt timeout (4 attempts, 100 ms gap → ~2.3 s worst case)
+and silently retries on `offline` / timeout / error before surfacing a
+red pill. The first `~HS` against a freshly-opened device is the most
+race-prone; transient framing failures don't reach the user.
+
+### 8b. Printer capability detection
+
+When the user selects a printer, the page also fires three queries in
+parallel through the SDK queue:
+
+| Query | Sent | Used for |
+|---|---|---|
+| `getSGD('head.resolution.in_dpi')` | `! U1 getvar "head.resolution.in_dpi"\r\n` | dpi (Link-OS 4+ canonical) |
+| `getConfiguration()` | `^XA^HH^XZ` | `printWidth` (dots), `labelLength` (dots), `RESOLUTION` field, firmware |
+| `getInfo()`          | `~hi\r\n` | model string (e.g. `"GX430t-300dpi"`) |
+
+…then resolves dpi by escalating fallbacks:
+
+1. `head.resolution.in_dpi` SGD value
+2. `cfg.settings.RESOLUTION` parsed for leading integer (e.g.
+   `"300 8/mm FULL"` → 300)
+3. `info.model` regex `/(\d+)\s*dpi/i` (e.g. `"GX430t-300dpi"` → 300)
+4. `device.host_resolution` SGD as a last-resort round-trip
+
+The GX430t we tested doesn't expose `head.resolution.in_dpi` *or* a
+`RESOLUTION` field; detection succeeds on fallback 3 via the model
+string. Width and height are computed as `printWidth / dpi` and
+`labelLength / dpi`. Manual edits to any of the three inputs are sticky
+— a re-detection won't stomp on a user override; reselect the printer in
+the dropdown to wipe overrides and detect afresh.
+
+Detection has a longer per-query timeout (5 s, single attempt) than
+status reads. Two reasons:
+
+- `getSGD` uses `sendThenReadAllAvailable` → `readUntilStringReceived`
+  with an empty search string, which **always recurses** until `/read`
+  returns empty. With the shim's 2 s read timeout that means a single
+  SGD call costs ~2.25 s minimum even when the printer answers
+  immediately.
+- Our requests queue *behind* the SDK's own auto-fired
+  `getConfiguration` (kicked off by `Zebra.Printer`'s `configTimeout`)
+  plus the parallel `refreshStatus`, adding ~500–800 ms of contention.
+
+Failures are best-effort: the inputs keep their previous values and a
+warning lands in the log panel — no red error pill. If every dpi source
+fails, the log dumps the available `^HH` keys so the next round of
+fallbacks can be added without another debug round-trip.
 
 ---
 
@@ -644,3 +734,5 @@ For production this should be vendored next to `pdf-lib.min.js`.
 | 14 | This README. |
 | 15 | Confirmed the `DEFAULT_FEATURE_KEY` in `browser-print.html` is the *public* PDF demo key Zebra hands out for prototyping (hardcoded plaintext on Zebra's own test harness at `cagdemo.com/BrowserPrint/test/external/zebra_test.html`, with Zebra's developer forum thread 25874 directing users there to copy it). Kept the key in the repo with a citation comment instead of stripping it. Documented PDF Direct (`device.sendFile(pdfBlob)`) as an alternative pathway that needs no `featureKey` if the printer firmware supports it — best production answer if the deployed GX430t fleet has it enabled. |
 | 16 | Promoted this prototype out of `openmrs-module-printer/testing/` into a standalone repo at `pih/zebra-printing-tools` — it had grown beyond a "testing" scratchpad (shim, README, SDK, multiple pathways) and the dependency direction is the other way around (the OpenMRS module would consume tools from here, not the other way). |
+| 17 | Tracked spurious red "Offline" pills + indefinite "querying…" on the status row to the SDK's STX/ETX framing check on `~HS` responses (`offline = true` whenever the trimmed body doesn't *both* start with `0x02` and end with `0x03`). The actual `~HS` reply is three STX/ETX-framed records flushed back-to-back; the shim's old `/read` returned after the first `select()` fired, often capturing only the first frame. Fixed at the shim layer with `_drain_until_quiet_fd` / `_drain_until_quiet_sock` (drain until 150 ms of silence, 1500 ms hard cap). Belt-and-braces on the page: race each `getStatus` against a 500 ms timeout, retry up to 3× silently on offline / timeout / error, surface the truthful end state. ~2.3 s worst case for both auto-fire and manual click. |
+| 18 | Generalised the prototype off the GX430t. Resolution dropdown → numeric input + datalist; new width / height inputs in inches. On device selection the page now fires `head.resolution.in_dpi` SGD + `^XA^HH^XZ` + `~hi` in parallel through the SDK queue, then resolves dpi by escalating fallbacks (canonical SGD → `cfg.settings.RESOLUTION` → model-string regex → `device.host_resolution` SGD). The GX430t we tested doesn't expose the canonical SGD or a RESOLUTION field; detection succeeds on the model-string fallback (`"GX430t-300dpi"` → 300). User edits are sticky — re-detection won't overwrite them; reselect the printer to wipe overrides and detect afresh. Detection has its own 5 s per-query timeout (separate from the status budget) because `getSGD` uses `sendThenReadAllAvailable`, which recurses until `/read` returns empty — costing ~2.25 s per SGD call even on a fast printer. |
