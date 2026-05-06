@@ -40,20 +40,23 @@ retrace the conversation.
 - **Target printers:** any Zebra ZPL printer the Browser Print helper /
   shim can see. Developed against a GX430t (300 dpi); should also cover
   GX420t / ZD220 (203 dpi), ZD/ZT 600 dpi variants, etc. The page reads
-  the head density and currently-loaded label size from the printer on
-  selection (see §8b), defaults to whichever display unit the printer
-  itself reports in (inches if dpi-only, millimetres if `N/mm` was
-  found), and lets the user override either before printing.
+  the head density and printer model from the selected printer's
+  configuration (see §8b) and surfaces them in the printer info card;
+  the ZPL textarea defaults to a hardcoded 3"×2" layout sized to the
+  detected DPI, and users edit `^PW`/`^LL` directly in the textarea for
+  other media.
 - **Client OSes:** primarily Windows; should also work on Ubuntu and macOS.
 - **Browser:** Chrome.
 - **Hard requirements:**
   - No print dialog.
   - No per-print user interaction (one-time setup is fine).
   - Printer remains usable by other applications on the same machine.
-- **Scope:** an HTML page that prints labels via four pathways (form-based
-  ZPL, form-based PDF, custom ZPL, uploaded PDF), exposing both ZPL-direct
-  and PDF-input transports. Default form geometry is 3"×2" with text and a
-  Code 128 barcode of `A456123`; can be set to whatever stock is loaded.
+- **Scope:** an HTML page that exposes two operations on a single ZPL
+  textarea (Print direct, or Generate PDF and Print this PDF round-tripped
+  via the helper PDF→ZPL conversion), plus a skip-preview shortcut for
+  printing arbitrary PDFs. Default ZPL is a 3"×2" demo label with text and
+  a Code 128 barcode of `A456123`; users edit the textarea directly for
+  other media or content.
 - **Existing OpenMRS module behaviour:** server-side ZPL generation, then
   pushed to network printers over a raw TCP socket on port 9100. The
   client-side path needs a different transport but should reuse the same
@@ -303,6 +306,51 @@ early in any PIH rollout. See §10.
 
 ## 5. Setup
 
+### Quickstart
+
+**Linux** (Ubuntu / Debian / similar):
+
+```bash
+sudo apt install ghostscript                    # for PDF→ZPL conversion (existing pipeline)
+sudo usermod -aG lp $USER && newgrp lp          # USB printer access (re-login if newgrp not available)
+./install-zpl2pdf.sh                            # bundled ZPL→PDF binary (~60 MB)
+./restart-shim.sh                               # starts the shim in foreground; Ctrl-C to stop
+# in another terminal:
+python3 -m http.server 8000
+# open http://localhost:8000/browser-print.html in Chrome
+```
+
+**Windows:**
+
+```powershell
+# 1. Install Zebra's Browser Print helper (one-time, GUI installer):
+#    https://www.zebra.com/us/en/support-downloads/software/printer-software/browser-print.html
+# 2. (optional, only for Generate-PDF preview) install the shim and zpl2pdf:
+.\install-zpl2pdf.ps1
+python browser-print-shim.py
+# 3. Serve the page in another terminal:
+python -m http.server 8000
+# open http://localhost:8000/browser-print.html in Chrome
+```
+
+**macOS:**
+
+```bash
+# 1. Install Zebra's Browser Print helper (one-time, .pkg installer):
+#    https://www.zebra.com/us/en/support-downloads/software/printer-software/browser-print.html
+# 2. (optional, only for Generate-PDF preview) install the shim and zpl2pdf:
+brew install ghostscript                        # if not already installed
+./install-zpl2pdf.sh
+./restart-shim.sh
+# 3. Serve the page in another terminal:
+python3 -m http.server 8000
+# open http://localhost:8000/browser-print.html in Chrome
+```
+
+The sections below cover what each piece does and the trade-offs when something goes wrong. If you just want to print, the quickstart above is sufficient.
+
+---
+
 You need *something* listening on `http://127.0.0.1:9100/` that speaks the
 Browser Print API. Two routes:
 
@@ -323,10 +371,12 @@ Once one of those is running, the rest is the same:
    python3 -m http.server 8000
    # → http://localhost:8000/browser-print.html
    ```
-3. Open the page, pick your printer in the dropdown (the page reads its
-   dpi and label dimensions on selection — see §8b — and pre-fills the
-   geometry inputs accordingly; override anything the printer reports
-   wrong), exercise each pathway. Watch the status pill after each print.
+3. Open the page, pick your printer in the dropdown — the printer info
+   card populates with detected dpi / model / firmware, and the ZPL
+   textarea is pre-filled with the demo label sized to the detected DPI.
+   Edit the textarea (e.g. `^PW`/`^LL` for non-3"×2" media), then click
+   **Print** for direct ZPL or **Generate PDF** to preview. Watch the
+   status pill after each print.
 
 ### 5a. Official Browser Print (Windows / macOS)
 
@@ -350,11 +400,20 @@ The printer must already be registered with the OS — USB driver installed
 on Windows / macOS, or added as a network printer via its IP. Browser Print
 discovers what the OS already sees.
 
-### 5b. Linux dev shim — `browser-print-shim.py`
+**PDF preview support.** The *Generate PDF* button in the page requires a `POST /zpl-to-pdf` endpoint that Zebra's official helper does NOT expose. If you want the live PDF preview on Windows or macOS, you have two options:
 
-Since Zebra's helper isn't currently distributed for Linux, this folder
-includes a minimal Python shim that mirrors the Browser Print HTTP API. The
-SDK in the browser does not know it's talking to a substitute.
+1. **Run the shim alongside the official helper.** The shim listens on the same port (9100) by default — pick one to keep enabled at a time, or run the shim on a different port and adjust the page's fetch URL. The shim's `POST /zpl-to-pdf` endpoint shells out to a bundled `zpl2pdf` binary; install it via `.\install-zpl2pdf.ps1` on Windows or `./install-zpl2pdf.sh` on macOS. See §5b for shim setup details.
+2. **Skip the preview.** The *Print* button (direct ZPL) and the *Print uploaded PDF* skip-preview shortcut still work without the shim. The page detects this and shows "PDF preview unavailable" in the Generated PDF section instead of the iframe — graceful degradation, no errors.
+
+If you don't need the preview at all, the official helper is sufficient.
+
+### 5b. Browser Print API substitute — `browser-print-shim.py`
+
+A minimal Python shim that mirrors the Browser Print HTTP API. The SDK in
+the browser does not know it's talking to a substitute. **Two main use cases:**
+
+1. **Linux primary helper.** Zebra doesn't ship a current Browser Print build for Linux, so the shim is the only practical way to drive a Zebra printer from this page on Ubuntu / Debian / etc.
+2. **Windows / macOS PDF-preview helper.** The shim's `POST /zpl-to-pdf` endpoint (backed by the bundled `zpl2pdf` binary) doesn't exist in Zebra's official helper. Run the shim alongside or instead of Zebra's helper to get the live PDF preview on Win/Mac. (See §5a for trade-offs.)
 
 ```
 python3 browser-print-shim.py                                    # USB only
@@ -545,10 +604,12 @@ expectations.
 - No driver swap is needed (this is the whole point of choosing Browser
   Print over WebUSB).
 - USB and network printers both work.
+- **PDF preview** is not provided by Zebra's helper. To get the *Generate PDF* button working on Windows, install the shim's `zpl2pdf` binary via `.\install-zpl2pdf.ps1` and run `python browser-print-shim.py` alongside (or instead of) Zebra's helper. See §5a for trade-offs.
 
 ### macOS
 - Generally just works. The printer can stay registered in CUPS — Browser
   Print uses it normally rather than fighting for exclusive USB access.
+- **PDF preview** same caveat as Windows: Zebra's helper doesn't expose `POST /zpl-to-pdf`. Run the shim with `./install-zpl2pdf.sh` + `python3 browser-print-shim.py` if you want the preview. See §5a.
 
 ### Ubuntu / Linux
 - No official Browser Print build on the main downloads page; we use
@@ -568,20 +629,21 @@ expectations.
 ## 7. ZPL primer (what the page emits)
 
 For a 3" × 2" label that's 900 × 600 dots at 300 dpi (or 609 × 406 at
-203 dpi). The page reads dpi, width, and height from inputs (auto-filled
-on device selection — see §8b) and scales `^PW` / `^LL` accordingly; the
-sample ZPL below shows the 300-dpi GX430t case.
+203 dpi). The page generates default ZPL based on a hardcoded 3"×2" layout
+scaled to the detected DPI, then writes it into the textarea where you can
+edit it freely (e.g. change `^PW` / `^LL` for different media). The sample
+below is what the textarea contains for a 300-dpi printer right after
+selection:
 
-**Pathway 1 sample (layout matches what pathway 2 produces — same margins,
-font sizes, bottom-anchored barcode):**
+**Default ZPL the page pre-fills (3"×2" at 300 dpi):**
 ```
 ^XA
 ^CI28                                          ; UTF-8
 ^PW900                                         ; print width in dots
 ^LL600                                         ; label length in dots
 ^LH0,0                                         ; label home
-^FO50,50^A0N,58,58^FDOpenMRS Test Label^FS     ; header (matches PDF 14 pt)
-^FO50,130^A0N,46,46^FDID: A456123^FS           ; body (matches PDF 11 pt)
+^FO50,50^A0N,58,58^FDOpenMRS Test Label^FS     ; header text
+^FO50,130^A0N,46,46^FDID: A456123^FS           ; body text
 ^BY6,2,200                                     ; bar module=6 dots, ratio=2:1, height=200
 ^FO50,310^BCN,200,Y,N,N^FDA456123^FS           ; Code 128, bottom-anchored, with HRI
 ^XZ
