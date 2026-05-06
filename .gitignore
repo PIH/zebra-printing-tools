@@ -19,3 +19,7 @@ printers.json
 # Local TLS material if anyone generates it for the shim's --https mode
 *.pem
 *.key
+
+# zpl2pdf binaries (installed via install-zpl2pdf.sh; not committed)
+/bin/*/
+!/bin/.gitkeep
