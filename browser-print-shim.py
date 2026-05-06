@@ -1034,11 +1034,21 @@ class Handler(BaseHTTPRequestHandler):
             tmp.write(zpl_bytes)
             tmp.flush()
             tmp.close()
+            label_pts = _parse_label_size_pts(zpl_bytes, dpi)
+
+            # Pass explicit -w/-h when we can derive them from ^PW/^LL.
+            # zpl2pdf's offline renderer's auto-detect produces a MediaBox
+            # ~1.5× larger than the content; the explicit-dim path produces
+            # a MediaBox just a few percent larger, which makes the
+            # downstream gs rescale work correctly.
+            argv = [binpath, '-i', tmp.name, '--stdout', '-d', str(dpi)]
+            if label_pts is not None:
+                w_in = label_pts[0] / 72.0
+                h_in = label_pts[1] / 72.0
+                argv += ['-w', f'{w_in:.4f}', '-h', f'{h_in:.4f}', '-u', 'in']
+
             t0 = time.monotonic()
-            proc = subprocess.run(
-                [binpath, '-i', tmp.name, '--stdout', '-d', str(dpi)],
-                capture_output=True, timeout=30,
-            )
+            proc = subprocess.run(argv, capture_output=True, timeout=30)
             dt_ms = (time.monotonic() - t0) * 1000.0
             if proc.returncode != 0:
                 stderr = proc.stderr.decode('utf-8', errors='replace')[:2048]
@@ -1059,7 +1069,6 @@ class Handler(BaseHTTPRequestHandler):
             # (1 pt = 1/72 in). When we have ^PW/^LL in the ZPL and
             # Ghostscript on PATH, rescale to the correct physical media.
             pdf_bytes = proc.stdout
-            label_pts = _parse_label_size_pts(zpl_bytes, dpi)
             if label_pts is not None and _have_ghostscript():
                 try:
                     pdf_bytes, gs_stderr = _rescale_pdf_via_gs(
