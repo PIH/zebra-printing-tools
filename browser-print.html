@@ -54,14 +54,18 @@
 
 <h1>Browser → Zebra printer via Browser Print</h1>
 <p class="muted">
-  Two pathways, side-by-side, same printer / dpi / inputs:
+  Print labels from the browser to any Zebra ZPL printer the Browser Print
+  helper can see. Four pathways:
   <b>(1) Direct ZPL</b> built from primitives,
-  <b>(2) PDF converted to ZPL by the Browser Print helper</b>
-  (Zebra's licensed converter, or the included Linux shim).
-  Built on Zebra's Browser Print SDK 3.1.250 — <code>BrowserPrint</code> for transport,
-  <code>Zebra.Printer</code> for parsed status. Resolution and label dimensions
-  auto-detect from the selected printer; override any field to print at a
-  different size.
+  <b>(2) PDF converted to ZPL by the helper</b>
+  (Zebra's licensed converter or the included Linux shim),
+  <b>Print custom ZPL</b> (paste your own) and
+  <b>Print uploaded PDF</b> (pick a file). Pathways 1 and 2 share the same
+  form fields above so the two outputs can be compared side-by-side.
+  Built on Zebra's Browser Print SDK 3.1.250 — <code>BrowserPrint</code> for
+  transport, <code>Zebra.Printer</code> for parsed status. Resolution and
+  label dimensions auto-detect from the selected printer; override any
+  field to print at a different size.
 </p>
 
 <!-- ============================================================ Connection -->
@@ -182,6 +186,42 @@
     <button id="convertHelper" disabled>Convert via helper</button>
     <button id="printHelper" disabled>Print helper-converted ZPL →</button>
     <span id="helperStatus" class="muted"></span>
+  </div>
+</section>
+
+<!-- ============================================================ Custom ZPL -->
+<section class="pathway">
+  <h2>Print custom ZPL</h2>
+  <p>
+    Send any ZPL block (typically <code>^XA…^XZ</code>) directly to the selected
+    printer. Useful for printing pre-generated ZPL from another system (e.g. the
+    OpenMRS printer module's server-side output) or for testing arbitrary ZPL
+    snippets without going through the form fields above.
+  </p>
+  <textarea id="customZpl" rows="8"
+            placeholder="^XA&#13;&#10;^FO50,50^A0N,40,40^FDhello^FS&#13;&#10;^XZ"></textarea>
+  <div class="row" style="margin-top: 0.5em">
+    <button id="printCustomZpl" disabled>Print custom ZPL →</button>
+    <span id="customZplStatus" class="muted"></span>
+  </div>
+</section>
+
+<!-- ============================================================ Upload PDF -->
+<section class="pathway">
+  <h2>Print uploaded PDF</h2>
+  <p>
+    Pick a PDF file and the page will run it through
+    <code>Zebra.Printer.getConvertedResource</code> (the same helper / shim
+    pipeline used by the form-based PDF pathway above) and print the resulting
+    ZPL. Uses the PDF feature key from pathway 2.
+  </p>
+  <div class="row">
+    <input type="file" id="customPdfFile" accept="application/pdf,.pdf">
+    <span id="customPdfInfo" class="muted"></span>
+  </div>
+  <div class="row" style="margin-top: 0.5em">
+    <button id="printCustomPdf" disabled>Print uploaded PDF →</button>
+    <span id="customPdfStatus" class="muted"></span>
   </div>
 </section>
 
@@ -338,8 +378,12 @@ function selectDevice(d) {
   device = d;
   zebra = d ? new Zebra.Printer(d) : null;
   const enabled = !!device;
-  $('printDirect').disabled  = !enabled;
-  $('convertHelper').disabled = !enabled;
+  $('printDirect').disabled    = !enabled;
+  $('convertHelper').disabled  = !enabled;
+  $('printCustomZpl').disabled = !enabled;
+  // The PDF-upload Print button is also gated on a file having been picked;
+  // re-evaluated by the file-input change handler when a file is chosen.
+  $('printCustomPdf').disabled = !(enabled && $('customPdfFile').files.length > 0);
   // setDiagEnabled toggles #refreshPrinter, the diag preset buttons, and
   // the custom-command Send / Send+Read buttons together.
   setDiagEnabled(enabled);
@@ -446,10 +490,10 @@ $('refreshPrinter').addEventListener('click', () => {
 // =============================================================================
 // Reads `head.resolution.in_dpi` via SGD and parses `^XA^HH^XZ` config for
 // PRINT WIDTH / LABEL LENGTH (both in dots). Pre-fills the geometry inputs
-// so the prototype works on any Zebra ZPL printer the helper can see, not
-// just whichever model the developer happened to have on the desk. The
-// user can override any input — manual edits are sticky and won't be
-// stomped by a re-detection.
+// so the page works on any Zebra ZPL printer the helper can see, not just
+// whichever model the developer happened to have on the desk. The user can
+// override any input — manual edits are sticky and won't be stomped by a
+// re-detection.
 //
 // SGD response format from the printer: `"203"\r\n` (quoted value + CRLF).
 // Configuration response: STX/ETX-framed multi-line block with fixed-width
@@ -1004,16 +1048,43 @@ function setDiagEnabled(enabled) {
 // =============================================================================
 // Pathway 1: Direct ZPL
 // =============================================================================
-// Layout intentionally mirrors what `buildPdf()` produces (same margins, font
-// heights, and bottom-anchored barcode), so labels from pathway 1 end up the
-// same physical size as labels from pathway 2 — apples to apples.
+// Native ZPL primitives — header / body via `^A0`, barcode via `^BC` Code 128
+// with the printer's built-in HRI. Sharp at any dpi, smallest payload, and
+// the most robust barcode (bars land exactly on dot boundaries because the
+// printer's firmware is choosing them).
 //
 // Reference numbers (300 dpi):
 //   margin   50 dots   ≈ 12 PDF points
-//   header   58 dots   ≈ 14 pt Helvetica Bold     (PDF: drawText size 14)
-//   body     46 dots   ≈ 11 pt Helvetica          (PDF: drawText size 11)
-//   barcode  ~200-dot bars + ~40-dot HRI line, ~840 dots wide (^BY module 6)
-//                                                  (PDF: 192 pt × ~55 pt)
+//   header   58 dots   ≈ 14 pt           (PDF: drawText size 14 Helvetica Bold)
+//   body     46 dots   ≈ 11 pt           (PDF: drawText size 11 Helvetica)
+//   barcode  ~200-dot bars + ~40-dot HRI line, ^BY module 6
+//
+// The output will *not* look identical to pathway 2's PDF→helper-converted
+// version; that's intentional and worth understanding (see README §4):
+//
+//   - Font face. Zebra Font 0 ≠ Helvetica. Strokes are thinner, letter
+//     shapes are different. Only fix is to upload a TrueType file via
+//     `^DU` and use `^A@`; out of scope here.
+//   - Barcode width. JsBarcode renders all 112 modules at 2 px each on a
+//     canvas that gets stretched to fill the available label width.
+//     Native ZPL Code 128 with auto-optimisation collapses digit runs to
+//     subset C — "A456123" becomes ~90 modules instead of 112. With the
+//     same `^BY` module width, the native bar block ends up ~25 % narrower
+//     than the PDF version. Forcing subset B with `>9` directives is
+//     firmware-dependent (the GX430t we tested treats `>9` as literal data
+//     rather than a subset selector); for that printer the only reliable
+//     way to match the PDF width is to render the barcode in JS via
+//     JsBarcode and embed it as a `^GFA` bitmap — which is essentially
+//     what pathway 2 does. We don't do that in pathway 1.
+//   - HRI font + centring. Same root cause: the printer renders HRI
+//     centred under whatever the actual bar block is, so a narrower bar
+//     block puts the HRI further left than the PDF's HRI.
+//
+// Net effect: pathway 1 produces the native ZPL rendering and the
+// form-based PDF pathway is calibrated to match it (see buildPdf below)
+// when both are generated from the same form fields. Visual differences
+// that remain (font face, hairline kerning) are inherent to native
+// vs vector pipelines.
 function buildDirectZpl({ title, body, value, dpi, widthDots, heightDots }) {
   const pw = widthDots, ll = heightDots;
   const scale = dpi / 300;
@@ -1060,6 +1131,32 @@ function regenerateDirect() {
 // =============================================================================
 // PDF generation (used by pathway 2)
 // =============================================================================
+// Calibrated to match buildDirectZpl()'s native ZPL output: when the helper
+// rasterises this PDF at the printer's dpi (300 by default in the shim),
+// the result reproduces what pathway 1 produces directly.
+//
+// Sizing strategy:
+//
+//   margin     12 pt   = 50 dots @ 300 dpi      → matches ZPL margin
+//   header     17 pt                            → Helvetica Bold visible cap
+//                                                 ≈ 12 pt ≈ 50 dots ≈ ZPL ^A0N,58
+//   body       13 pt                            → cap ≈ 9 pt ≈ 38 dots ≈ ZPL ^A0N,46
+//   barcode    drawn at 1 canvas-px : 1 dot     → 6 px module = 6 dot module
+//                                                 (matches ZPL ^BY 6)
+//                                                 200 px bars = 200 dot bars
+//                                                 (matches ZPL ^BC h=200)
+//   HRI        50 px font                       → matches ZPL inherited body font
+//
+// The 1:1 px-to-dot rendering is achieved by drawing the JsBarcode canvas at
+// width = bc.width × 72/300 pt; one canvas pixel becomes exactly one printer
+// dot when rasterised at 300 dpi. Subset-C optimisation in JsBarcode produces
+// the same module count as ZPL's `^BC` (which also auto-optimises), so the
+// resulting bar block has the same width.
+//
+// What we do *not* match: the font *face*. Zebra Font 0 is not Helvetica;
+// stroke weights and letter shapes differ. Fixing that requires uploading
+// a TrueType file via `^DU` and using `^A@`, which is outside this page's
+// scope.
 async function buildPdf({ title, body, value, widthIn, heightIn }) {
   const { PDFDocument, StandardFonts } = PDFLib;
   const doc = await PDFDocument.create();
@@ -1068,21 +1165,58 @@ async function buildPdf({ title, body, value, widthIn, heightIn }) {
   const fontReg  = await doc.embedFont(StandardFonts.Helvetica);
   const fontBold = await doc.embedFont(StandardFonts.HelveticaBold);
 
-  const margin = 12;
-  page.drawText(title, { x: margin, y: H - margin - 14, size: 14, font: fontBold });
-  page.drawText(body,  { x: margin, y: H - margin - 14 - 18, size: 11, font: fontReg });
+  const margin     = 12;
+  const headerSize = 17;
+  const bodySize   = 13;
+  const lineGap    = 5;          // gap between header descender and body cap
+  const CAP_RATIO  = 0.7;        // Helvetica cap height as fraction of point size
 
+  const headerCap = headerSize * CAP_RATIO;
+  const bodyCap   = bodySize   * CAP_RATIO;
+
+  // drawText's `y` is the baseline. Position so the header glyph TOP sits
+  // at `margin` from the PDF top; body glyph TOP sits `lineGap` below the
+  // header baseline (which is the bottom of header caps).
+  page.drawText(title, {
+    x: margin,
+    y: H - margin - headerCap,
+    size: headerSize,
+    font: fontBold,
+  });
+  page.drawText(body, {
+    x: margin,
+    y: H - margin - headerCap - lineGap - bodyCap,
+    size: bodySize,
+    font: fontReg,
+  });
+
+  // Barcode rendered at 1 canvas-px : 1 printer-dot at 300 dpi.
+  // `width: 6` matches pathway 1's hardcoded `^BY 6`; with the same data
+  // and (usually) the same Code 128 subset-optimisation, the bar blocks
+  // come out at the same physical width. `fontSize` / `textMargin` sized
+  // to match pathway 1's HRI line (^A0N,46 inherited from body).
   const bc = document.createElement('canvas');
   JsBarcode(bc, value, {
-    format: 'CODE128', displayValue: true, fontSize: 14,
-    height: 60, width: 2, margin: 0,
-    background: '#ffffff', lineColor: '#000000',
+    format: 'CODE128',
+    displayValue: true,
+    fontSize: 46,
+    height: 200,
+    width: 6,
+    textMargin: 2,
+    margin: 0,
+    background: '#ffffff',
+    lineColor: '#000000',
   });
   const blob = await new Promise(r => bc.toBlob(r, 'image/png'));
   const png  = await doc.embedPng(await blob.arrayBuffer());
-  const bcAvail = W - 2 * margin;
-  const bcAspect = bc.height / bc.width;
-  page.drawImage(png, { x: margin, y: margin, width: bcAvail, height: bcAvail * bcAspect });
+
+  const dpiScale = 72 / 300;     // pt per dot at 300 dpi rasterisation
+  page.drawImage(png, {
+    x: margin,                   // left-aligned at margin, matching pathway 1
+    y: margin,                   // anchor barcode to bottom margin
+    width:  bc.width  * dpiScale,
+    height: bc.height * dpiScale,
+  });
 
   return doc.save();   // Uint8Array
 }
@@ -1168,6 +1302,71 @@ $('downloadPdf').addEventListener('click', () => {
   a.download = 'label.pdf';
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+});
+
+// =============================================================================
+// Custom ZPL — paste arbitrary ZPL and send it directly to the printer.
+// =============================================================================
+$('printCustomZpl').addEventListener('click', () => {
+  const zpl = $('customZpl').value;
+  if (!zpl.trim()) {
+    setText('customZplStatus', 'Empty ZPL — nothing to print.', 'warn');
+    return;
+  }
+  setText('customZplStatus', '');
+  printZpl(zpl, 'Custom ZPL');
+});
+
+// =============================================================================
+// Upload PDF — select a PDF file, run it through the helper's PDF→ZPL
+// conversion, send the result. Same pipeline as pathway 2's helper conversion;
+// reuses the PDF feature key from that section.
+// =============================================================================
+$('customPdfFile').addEventListener('change', () => {
+  const file = $('customPdfFile').files[0];
+  if (file) {
+    setText('customPdfInfo',
+      `${file.name} · ${file.size.toLocaleString()} bytes`);
+    $('printCustomPdf').disabled = !device;
+  } else {
+    setText('customPdfInfo', '');
+    $('printCustomPdf').disabled = true;
+  }
+  setText('customPdfStatus', '');
+});
+
+$('printCustomPdf').addEventListener('click', async () => {
+  const file = $('customPdfFile').files[0];
+  if (!file)   { setText('customPdfStatus', 'No file selected.', 'warn'); return; }
+  if (!zebra)  { setText('customPdfStatus', 'No printer.',       'err');  return; }
+  const featureKey = $('featureKey').value.trim();
+
+  setText('customPdfStatus', `Converting ${file.name}…`);
+  const t0 = performance.now();
+  try {
+    const zpl = await zebra.getConvertedResource(file, {
+      toFormat:   'zpl',
+      fromFormat: 'pdf',
+      ...(featureKey ? { featureKey } : {}),
+    });
+    const dtConv = (performance.now() - t0).toFixed(0);
+    setText('customPdfStatus',
+      `Converted ${zpl.length.toLocaleString()} chars in ${dtConv} ms; sending…`);
+    await devSend(device, zpl);
+    const dtTotal = (performance.now() - t0).toFixed(0);
+    setText('customPdfStatus',
+      `Printed ${zpl.length.toLocaleString()} chars in ${dtTotal} ms (incl. conversion).`,
+      'ok');
+    log(`Custom PDF: ${file.name} → ${zpl.length.toLocaleString()} bytes ZPL, ${dtTotal} ms total`, 'ok');
+    setTimeout(refreshStatus, 350);
+  } catch (e) {
+    const msg = (e && e.message) || String(e);
+    setText('customPdfStatus', `Error: ${msg}`, 'err');
+    log(`Custom PDF (${file.name}) failed: ${msg}` +
+        (msg.toLowerCase().includes('license') || msg.toLowerCase().includes('key')
+          ? '  ← typically means the PDF feature key is missing or invalid'
+          : ''), 'err');
+  }
 });
 
 // =============================================================================
