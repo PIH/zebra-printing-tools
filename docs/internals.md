@@ -325,14 +325,28 @@ content-padding excess in a single pass.
 
 When the page talks to Zebra's *official* helper on Windows / macOS,
 `device.convertAndSendFile` for a PDF blob requires a `featureKey` (per
-Zebra's own SDK docs). The page surfaces a hint when the error message
-contains "license" or "key". The bundled shim's `/convert` endpoint
-ignores the feature key — it does the conversion via Ghostscript, no
-Zebra license required. The page carries a public demo key (the same
-one Zebra hands out for prototyping at
-`cagdemo.com/BrowserPrint/test/external/zebra_test.html`) baked in as
-`DEFAULT_FEATURE_KEY` so the upload-PDF path works out-of-the-box on
-Zebra's helper.
+Zebra's own SDK docs) — both the Generated-PDF "Print this PDF" path
+(`convertAndSendFileViaSdk`) and the upload-PDF shortcut
+(`getConvertedResource`) feed the same value through. The page surfaces
+a hint when the error message contains "license" or "key". The bundled
+shim's `/convert` endpoint ignores the feature key — it does the
+conversion via Ghostscript, no Zebra license required.
+
+**Resolution order, in `loadFeatureKey()` at startup:**
+
+1. `fetch('feature-key.txt')` from the same origin (i.e.
+   `app/feature-key.txt`, gitignored). One-line file containing the
+   key. If 200 with non-empty body, that wins.
+2. Otherwise fall back to a hardcoded `DEFAULT_FEATURE_KEY` — the
+   *public demo key* Zebra hands out for prototyping at
+   `cagdemo.com/BrowserPrint/test/external/zebra_test.html`. So the
+   upload-PDF path works out-of-the-box against Zebra's helper without
+   any per-deployment config.
+
+There is no UI input for the key; it's deployment configuration, not
+per-session state. The historical "PDF feature key" textbox + "remember
+in localStorage" checkbox was removed in May 2026 — see decision-log
+entry 25.
 
 ---
 

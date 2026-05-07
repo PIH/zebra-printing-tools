@@ -156,13 +156,6 @@
     the ZPL→PDF round-trip.
   </p>
   <div class="row">
-    <label>PDF feature key:
-      <input id="featureKey" type="password" size="40"
-             placeholder="paste Zebra PDF conversion license key (ignored by the shim)">
-    </label>
-    <label><input id="rememberKey" type="checkbox"> remember in localStorage</label>
-  </div>
-  <div class="row" style="margin-top: 0.5em">
     <input type="file" id="customPdfFile" accept="application/pdf,.pdf">
     <span id="customPdfInfo" class="muted"></span>
   </div>
@@ -1017,7 +1010,6 @@ $('printCustomPdf').addEventListener('click', async () => {
   const file = $('customPdfFile').files[0];
   if (!file)   { setText('customPdfStatus', 'No file selected.', 'warn'); return; }
   if (!zebra)  { setText('customPdfStatus', 'No printer.',       'err');  return; }
-  const featureKey = $('featureKey').value.trim();
 
   setText('customPdfStatus', `Converting ${file.name}…`);
   const t0 = performance.now();
@@ -1105,50 +1097,57 @@ $('printPdf').addEventListener('click', async () => {
 // Windows/macOS, or the shim's Ghostscript pipeline on Linux), and
 // sends the resulting ZPL to the device.
 function convertAndSendFileViaSdk(blob) {
-  const featureKey = (($('featureKey') && $('featureKey').value) || '').trim();
   return new Promise((res, rej) => {
     device.convertAndSendFile(blob, res, rej, { featureKey });
   });
 }
 
 // =============================================================================
-// PDF feature key default — pre-populated for convenience.
+// PDF feature key — Zebra's licensed PDF→ZPL conversion in the official
+// helper checks this against the printer's serial number. Two ways to set it:
 //
-// This is the *public demo key* that Zebra hands out for prototyping PDF
-// conversion via Browser Print. It is hardcoded in plaintext on Zebra's own
-// public test harness and Zebra's developer forum directs developers to
-// extract it from there:
-//   https://cagdemo.com/BrowserPrint/test/external/zebra_test.html
-//   https://developer.zebra.com/forum/25874
-// So committing it here is the same posture Zebra itself takes.
+//   1. Drop a one-line file at app/feature-key.txt (gitignored) — preferred
+//      for production deployments. Loaded at startup from the same origin
+//      that serves the page.
+//   2. Fall back to the public demo key below — works for prototyping.
+//      Hardcoded in plaintext on Zebra's own public test harness, and
+//      Zebra's developer forum directs developers to extract it from there:
+//        https://cagdemo.com/BrowserPrint/test/external/zebra_test.html
+//        https://developer.zebra.com/forum/25874
+//      So committing it here is the same posture Zebra itself takes.
 //
-// Caveats:
-//   - Zebra could rotate or revoke this key at any time.
-//   - For production rollouts, obtain a per-machine key from Zebra OR
-//     skip conversion entirely via PDF Direct (see README §4 — no key
-//     needed if the printer firmware has PDF Direct enabled).
-//   - Per-user override always wins via the input field + localStorage.
+// The shim ignores the key entirely (it doesn't enforce the license check),
+// so on Linux + shim it's a no-op either way. The two PDF→ZPL print
+// pathways (Generated-PDF "Print this PDF" and the upload-PDF shortcut)
+// both read the same module-level `featureKey`.
+//
+// Caveats: Zebra could rotate or revoke the demo key at any time. For
+// production rollouts on Windows/macOS, obtain a per-machine key from
+// Zebra (then drop it in app/feature-key.txt) OR skip conversion entirely
+// via PDF Direct (see README §4 — no key needed if the printer firmware
+// has PDF Direct enabled).
 // =============================================================================
 const DEFAULT_FEATURE_KEY =
   'AbsQM…';
 
-// Persist feature key
-{
-  const saved = localStorage.getItem('zebraFeatureKey');
-  if (saved !== null) {
-    $('featureKey').value = saved;
-    $('rememberKey').checked = true;
-  } else if (DEFAULT_FEATURE_KEY) {
-    $('featureKey').value = DEFAULT_FEATURE_KEY;
-    // Don't auto-check "remember" — leave that to the user.
+let featureKey = DEFAULT_FEATURE_KEY;
+
+async function loadFeatureKey() {
+  try {
+    const r = await fetch('feature-key.txt', { cache: 'no-store' });
+    if (r.ok) {
+      const txt = (await r.text()).trim();
+      if (txt) {
+        featureKey = txt;
+        log('PDF feature key: loaded from app/feature-key.txt');
+        return;
+      }
+    }
+  } catch (_e) {
+    // Network-style failure (offline, fetch blocked) — fall through.
   }
-  $('featureKey').addEventListener('change', () => {
-    if ($('rememberKey').checked) localStorage.setItem('zebraFeatureKey', $('featureKey').value.trim());
-  });
-  $('rememberKey').addEventListener('change', () => {
-    if (!$('rememberKey').checked) localStorage.removeItem('zebraFeatureKey');
-    else localStorage.setItem('zebraFeatureKey', $('featureKey').value.trim());
-  });
+  log('PDF feature key: using built-in public demo key ' +
+      '(drop your own in app/feature-key.txt to override)');
 }
 
 // =============================================================================
@@ -1158,6 +1157,7 @@ const DEFAULT_FEATURE_KEY =
   // Show initial unavailable message — will be replaced by refreshHelperInfo
   // if pdfPreviewSupported is confirmed, or left in place if not.
   setPdfMessage('PDF preview will appear here once a printer is selected.', 'info');
+  await loadFeatureKey();
   await discover();
 })();
 </script>

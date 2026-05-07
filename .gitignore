@@ -23,3 +23,7 @@ printers.json
 # zpl2pdf binaries (installed via install-zpl2pdf.sh; not committed)
 /utils/bin/*/
 !/utils/bin/.gitkeep
+
+# Optional per-deployment override for the PDF feature key (see app/browser-print.html
+# DEFAULT_FEATURE_KEY block). Falls back to the bundled public demo key if absent.
+/app/feature-key.txt

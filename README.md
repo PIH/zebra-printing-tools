@@ -175,6 +175,27 @@ discovers what the OS already sees.
 
 If you don't need the preview at all, the official helper is sufficient.
 
+#### PDF feature key
+
+Zebra's official helper enforces a `featureKey` license check on
+`device.convertAndSendFile` for PDF input — both the *Print this PDF*
+button (under Generated PDF) and the *Print uploaded PDF* shortcut hit
+this code path. The page ships a public demo key (the same key Zebra
+hardcodes on its own test harness), so out-of-the-box prototyping works
+without any setup.
+
+For production deployments where the demo key isn't acceptable,
+override it by dropping a one-line file at `app/feature-key.txt` —
+gitignored, loaded by the page at startup. If absent, the bundled demo
+key is used. There is no UI input; it's deployment config, not
+per-session state. The shim ignores the key entirely (no license
+check), so this only matters when you're driving Zebra's official
+helper.
+
+For an even cleaner path on supported printers, see PDF Direct in
+[internals §5](docs/internals.md#5-pdf-direct-as-alternative-architecture)
+— firmware-side PDF rendering, no `featureKey` required at all.
+
 ### 4b. The shim — `utils/browser-print-shim.py`
 
 A minimal Python shim that mirrors the Browser Print HTTP API. The SDK in
@@ -337,6 +358,9 @@ app/                                ← everything served to the browser
                                       Both .min.js files are from Zebra's "Browser Print SDK v3.1.250" download
                                       (see §7 Further reading for the developer-site link, JSDoc reference, and
                                       sample app); we vendor them so the page works offline.
+  feature-key.txt                   ← optional, gitignored: one-line override for the bundled public PDF demo key
+                                      (see §4a). Only matters when Zebra's official helper is the active
+                                      Browser Print helper; the shim ignores the key entirely.
 utils/                              ← server-side helpers (run by the user, not loaded in the browser)
   browser-print-shim.py             ← Linux dev shim (Browser Print API substitute) — supports USB and network transports;
                                       adds POST /zpl-to-pdf for ZPL→PDF preview when the bundled zpl2pdf is installed
