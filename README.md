@@ -101,8 +101,10 @@ setup is required on Linux.)
 #    skip it if you only need that path. Example with a key extracted
 #    from Zebra's public demo harness:
 echo YOUR_KEY_HERE > app\feature-key.txt
-# 3. (optional, only for Generate-PDF preview) install the shim and zpl2pdf:
-.\utils\install-zpl2pdf.ps1
+# 3. (optional, only for Generate-PDF preview) install the shim and zpl2pdf.
+#    PowerShell's default ExecutionPolicy blocks unsigned scripts; bypass it
+#    for this one invocation, or set CurrentUser policy once (see §5 Windows):
+powershell -ExecutionPolicy Bypass -File .\utils\install-zpl2pdf.ps1
 python utils\browser-print-shim.py
 # 4. Serve the page in another terminal:
 python -m http.server 8000 -d app
@@ -352,7 +354,24 @@ For the technical detail of how the shim's PDF→ZPL conversion works internally
 - No driver swap is needed (this is the whole point of choosing Browser
   Print over WebUSB).
 - USB and network printers both work.
-- **PDF preview** is not provided by Zebra's helper. To get the *Generate PDF* button working on Windows, install the shim's `zpl2pdf` binary via `.\utils\install-zpl2pdf.ps1` and run `python utils\browser-print-shim.py` alongside (or instead of) Zebra's helper. See §4a for trade-offs.
+- **PowerShell ExecutionPolicy.** The default policy on Windows blocks
+  unsigned `.ps1` scripts (you'll see "cannot be loaded because running
+  scripts is disabled on this system" when running `install-zpl2pdf.ps1`).
+  Two ways past it:
+  - **One-shot bypass** — no machine state change, works without admin:
+    ```powershell
+    powershell -ExecutionPolicy Bypass -File .\utils\install-zpl2pdf.ps1
+    ```
+  - **Permanent for your user** — set once, forget; still requires
+    signatures on internet-downloaded scripts:
+    ```powershell
+    Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+    ```
+  If the file was downloaded as a zip (rather than `git clone`d), Windows
+  may also have tagged it as internet-sourced; `Unblock-File .\utils\install-zpl2pdf.ps1`
+  clears that. The Quickstart in §3 uses the one-shot form so it works
+  on a fresh install.
+- **PDF preview** is not provided by Zebra's helper. To get the *Generate PDF* button working on Windows, install the shim's `zpl2pdf` binary via `.\utils\install-zpl2pdf.ps1` (see ExecutionPolicy note above) and run `python utils\browser-print-shim.py` alongside (or instead of) Zebra's helper. See §4a for trade-offs.
 
 ### macOS
 - Generally just works. The printer can stay registered in CUPS — Browser
