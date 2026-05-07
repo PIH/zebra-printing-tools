@@ -210,8 +210,9 @@ One optional JSON file consumed by both the page (via fetch from the served orig
 
 ```json
 {
-  "shimPort": 9102,
-  "featureKey": "AbsQM…",
+  "shimPort":      9102,
+  "shimHttpsPort": 9103,
+  "featureKey":    "AbsQM…",
   "networkPrinters": [
     { "name": "Lab GX430t", "host": "192.168.1.42", "port": 9100 }
   ]
@@ -220,11 +221,12 @@ One optional JSON file consumed by both the page (via fetch from the served orig
 
 | Key | Read by | Purpose |
 |---|---|---|
-| `shimPort` | page + shim | Where the shim binds. Default 9100. Must differ from 9100 *and* 9101 when Browser Print is running — Browser Print binds both (HTTP + HTTPS). See `shimPort` notes below. |
+| `shimPort` | page + shim | Where the shim binds (HTTP). Default 9100. Must differ from 9100 *and* 9101 when Browser Print is running — Browser Print binds both. See `shimPort` notes below. |
+| `shimHttpsPort` | page + shim | Where the shim binds (HTTPS, used when running with `--https`). Default 9101. Same conflict reasoning as `shimPort`. |
 | `featureKey` | page | Zebra PDF feature key for `convertAndSendFile`. |
 | `networkPrinters` | shim | List of `{name, host, port?}` entries; treated the same as `--network` flags. |
 
-The file is gitignored — never committed. The shim's `--http-port` and `--network` CLI flags still work and override file values when given.
+The file is gitignored — never committed. The shim's `--http-port`, `--https-port`, and `--network` CLI flags still work and override file values when given.
 
 ##### `featureKey`
 
@@ -234,11 +236,11 @@ We do not bundle a key. Zebra publishes a public demo key for prototyping at <ht
 
 For an even cleaner path on supported printers, see PDF Direct in [internals §5](docs/internals.md#5-pdf-direct-as-alternative-architecture) — firmware-side PDF rendering, no `featureKey` required at all.
 
-##### `shimPort`
+##### `shimPort` / `shimHttpsPort`
 
-On Linux there's no Browser Print competing for 9100, so the shim runs there by default — leave `shimPort` unset (or omit `app/config.json` entirely).
+On Linux there's no Browser Print competing for 9100/9101, so the shim runs there by default — leave both unset (or omit `app/config.json` entirely).
 
-On Windows / macOS, Browser Print binds **both 9100 (HTTP) and 9101 (HTTPS)** under one PID, each with `SO_EXCLUSIVEADDRUSE` on Windows — so neither port is available for the shim. **Pick 9102 or higher.** You can confirm what Browser Print is holding with:
+On Windows / macOS, Browser Print binds **both 9100 (HTTP) and 9101 (HTTPS)** under one PID, each with `SO_EXCLUSIVEADDRUSE` on Windows — so neither default port is available for the shim. **Pick a free pair like 9102 / 9103** and put both in `app/config.json`. (`shimHttpsPort` only matters if you're running the shim with `--https`; for the typical HTTP-localhost case, `shimPort` alone is sufficient.) You can confirm what Browser Print is holding with:
 
 ```powershell
 # Windows

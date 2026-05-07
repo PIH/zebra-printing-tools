@@ -1260,21 +1260,23 @@ def serve(port, ssl_ctx=None):
 def parse_args():
     here = os.path.dirname(os.path.abspath(__file__))
     # Pre-parse the config file so its values can serve as argparse defaults
-    # (--http-port specifically). We re-parse it later for non-default
+    # (--http-port and --https-port). We re-parse it later for non-default
     # network-printer extraction; load_config caches nothing, but the file
     # is small and read at startup, so two reads is fine.
     pre_config_path = _default_config_path()
     pre_config = load_config(pre_config_path)
-    default_port = DEFAULT_HTTP_PORT
-    if isinstance(pre_config.get('shimPort'), int) and 1 <= pre_config['shimPort'] <= 65535:
-        default_port = pre_config['shimPort']
+    valid_port = lambda v: isinstance(v, int) and not isinstance(v, bool) and 1 <= v <= 65535
+    default_http_port  = pre_config['shimPort']      if valid_port(pre_config.get('shimPort'))      else DEFAULT_HTTP_PORT
+    default_https_port = pre_config['shimHttpsPort'] if valid_port(pre_config.get('shimHttpsPort')) else DEFAULT_HTTPS_PORT
 
     p = argparse.ArgumentParser(description='Browser Print API shim. '
                                 'Stand-in helper on Linux; PDF-preview helper alongside Browser Print on Win/Mac.')
-    p.add_argument('--http-port',  type=int, default=default_port,
+    p.add_argument('--http-port',  type=int, default=default_http_port,
                    help='HTTP listen port. Default %(default)d (from app/config.json '
                         'shimPort if set, else 9100).')
-    p.add_argument('--https-port', type=int, default=DEFAULT_HTTPS_PORT)
+    p.add_argument('--https-port', type=int, default=default_https_port,
+                   help='HTTPS listen port (used with --https). Default %(default)d '
+                        '(from app/config.json shimHttpsPort if set, else 9101).')
     p.add_argument('--https', action='store_true',
                    help='Also bind HTTPS on --https-port (auto-generates a self-signed cert if needed).')
     p.add_argument('--cert', default=os.path.join(here, 'shim-cert.pem'))

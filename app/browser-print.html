@@ -257,21 +257,33 @@ let lastPdfUrl   = null;    // blob: URL backing the iframe + Download link
 let lastDetected = null;    // {dpi, dpm, widthDots, heightDots, model, …}
 let pdfPreviewSupported = false;   // from /config supportedConversions.zpl
 let helperIsShim = false;          // /config.version includes "shim" → our shim, not Zebra's helper
-// Where the shim lives. Default 9100 — also where Zebra's Browser Print
-// helper binds. They can't share the port:
-//   - On Linux (no Browser Print): shim runs at 9100, page gets everything from one URL.
-//   - On Windows/macOS (Browser Print): shim runs on a different port. Note
-//     Browser Print binds *both* 9100 (HTTP) and 9101 (HTTPS) under one PID,
-//     each with SO_EXCLUSIVEADDRUSE on Windows — pick 9102 or higher. User
-//     writes the chosen port to app/config.json under "shimPort"; both the
-//     page (loadConfig) and the shim (--http-port default) pick it up.
+// Where the shim lives. Defaults match Browser Print's own ports:
+//   shimPort      9100  (HTTP)
+//   shimHttpsPort 9101  (HTTPS)
+// They can't co-exist with Browser Print which binds *both* of those
+// under one PID with SO_EXCLUSIVEADDRUSE on Windows. Pick 9102 / 9103
+// (or any free pair) and put them in app/config.json — both the page
+// (loadConfig) and the shim (--http-port / --https-port defaults) read
+// the same file.
 //
-// Note: the Browser Print SDK is hardcoded to 9100 in its .min.js, so SDK
-// calls (write/read/available/default) always go there regardless of
-// shimPort. shimPort only governs where /zpl-to-pdf is sent.
-const PRIMARY_HELPER_URL = 'http://127.0.0.1:9100';
-const DEFAULT_SHIM_PORT  = 9100;
-let shimPort = DEFAULT_SHIM_PORT;
+//   - On Linux (no Browser Print): shim at 9100/9101 by default; page
+//     uses one URL, no config needed.
+//   - On Windows/macOS (Browser Print active): shim on a non-default
+//     port pair via shimPort/shimHttpsPort.
+//
+// The page picks HTTP-vs-HTTPS based on its own `location.protocol`:
+// page-over-HTTP uses shimPort; page-over-HTTPS uses shimHttpsPort
+// (rare; matches the SDK's own auto-switch to 9101).
+//
+// Note: the Browser Print SDK is hardcoded to 9100/9101 in its .min.js,
+// so SDK calls (write/read/available/default) always go there
+// regardless of shim* config. shim*Port only governs where /zpl-to-pdf
+// is sent.
+const PRIMARY_HELPER_URL      = 'http://127.0.0.1:9100';
+const DEFAULT_SHIM_PORT       = 9100;
+const DEFAULT_SHIM_HTTPS_PORT = 9101;
+let shimPort       = DEFAULT_SHIM_PORT;
+let shimHttpsPort  = DEFAULT_SHIM_HTTPS_PORT;
 let pdfShimBaseUrl = PRIMARY_HELPER_URL;
 let defaultZplSnapshot = '';// most recent default written into the textarea
 
@@ -294,9 +306,12 @@ async function refreshHelperInfo() {
     // If the primary helper at 9100 doesn't expose ZPL→PDF (typical on
     // Windows + macOS where Zebra's official helper handles printing
     // but has no /zpl-to-pdf endpoint) AND the user has configured the
-    // shim to run on a different port, probe that port for our shim
-    // running alongside as the PDF-preview helper. See README §4a.
-    if (!pdfPreviewSupported && !helperIsShim && shimPort !== DEFAULT_SHIM_PORT) {
+    // shim to run on a different port pair, probe that port for our
+    // shim running alongside as the PDF-preview helper. See README §4a.
+    const usingNonDefaultPort = (location.protocol === 'https:')
+      ? shimHttpsPort !== DEFAULT_SHIM_HTTPS_PORT
+      : shimPort      !== DEFAULT_SHIM_PORT;
+    if (!pdfPreviewSupported && !helperIsShim && usingNonDefaultPort) {
       await probeShim();
     }
     if (!pdfPreviewSupported) {
@@ -317,7 +332,8 @@ async function refreshHelperInfo() {
 // Connection failure is silently absorbed — the page just leaves PDF
 // preview disabled.
 async function probeShim() {
-  const url = `http://127.0.0.1:${shimPort}`;
+  // pdfShimBaseUrl is already set to the right scheme/port by loadConfig.
+  const url = pdfShimBaseUrl;
   try {
     const r = await fetch(`${url}/config`, { cache: 'no-store' });
     if (!r.ok) return;
@@ -1275,7 +1291,8 @@ function convertAndSendFileViaSdk(blob) {
 //
 // Schema:
 //   {
-//     "shimPort":       9101,                  // where the shim binds. Default 9100.
+//     "shimPort":       9102,                  // where the shim binds (HTTP).  Default 9100.
+//     "shimHttpsPort":  9103,                  // where the shim binds (HTTPS). Default 9101.
 //     "featureKey":     "AbsQM…",              // Zebra PDF feature key. See below.
 //     "networkPrinters": [                     // Read by shim only.
 //       { "name": "Lab GX430t", "host": "192.168.1.42", "port": 9100 }
@@ -1291,10 +1308,11 @@ function convertAndSendFileViaSdk(blob) {
 // §4a. The shim ignores the key (no license check), so Linux + shim
 // works without it.
 //
-// `shimPort` only matters when shim and Browser Print coexist (Win/Mac):
-// the user picks a port outside any Hyper-V/WSL2 reservations and writes
-// it here. The Browser Print SDK is hardcoded to 9100 in its .min.js, so
-// SDK calls always go to 9100; shimPort governs only /zpl-to-pdf.
+// `shimPort` / `shimHttpsPort` only matter when shim and Browser Print
+// coexist (Win/Mac): Browser Print binds 9100 + 9101 under one PID, so
+// the shim has to use a different pair (9102/9103 conventionally). The
+// Browser Print SDK is hardcoded to 9100/9101 in its .min.js, so SDK
+// calls always go there regardless; shim*Port only governs /zpl-to-pdf.
 let featureKey = '';
 
 async function loadConfig() {
@@ -1310,12 +1328,25 @@ async function loadConfig() {
     log(`Config: could not read app/config.json (${e.message || e}); using defaults.`, 'warn');
     return;
   }
-  if (Number.isInteger(cfg.shimPort) && cfg.shimPort > 0 && cfg.shimPort < 65536) {
+  const validPort = v => Number.isInteger(v) && v > 0 && v < 65536;
+  if (validPort(cfg.shimPort)) {
     shimPort = cfg.shimPort;
-    pdfShimBaseUrl = `http://127.0.0.1:${shimPort}`;
     log(`Config: shimPort = ${shimPort}`);
   } else if (cfg.shimPort !== undefined) {
     log(`Config: shimPort=${JSON.stringify(cfg.shimPort)} is invalid; using default ${DEFAULT_SHIM_PORT}.`, 'warn');
+  }
+  if (validPort(cfg.shimHttpsPort)) {
+    shimHttpsPort = cfg.shimHttpsPort;
+    log(`Config: shimHttpsPort = ${shimHttpsPort}`);
+  } else if (cfg.shimHttpsPort !== undefined) {
+    log(`Config: shimHttpsPort=${JSON.stringify(cfg.shimHttpsPort)} is invalid; using default ${DEFAULT_SHIM_HTTPS_PORT}.`, 'warn');
+  }
+  // Page-over-HTTPS is rare for localhost dev but the SDK auto-switches
+  // and so do we — keeps mixed-content errors from blocking /zpl-to-pdf.
+  if (location.protocol === 'https:') {
+    pdfShimBaseUrl = `https://127.0.0.1:${shimHttpsPort}`;
+  } else {
+    pdfShimBaseUrl = `http://127.0.0.1:${shimPort}`;
   }
   if (typeof cfg.featureKey === 'string' && cfg.featureKey.trim()) {
     featureKey = cfg.featureKey.trim();
