@@ -257,6 +257,15 @@ let lastPdfUrl   = null;    // blob: URL backing the iframe + Download link
 let lastDetected = null;    // {dpi, dpm, widthDots, heightDots, model, …}
 let pdfPreviewSupported = false;   // from /config supportedConversions.zpl
 let helperIsShim = false;          // /config.version includes "shim" → our shim, not Zebra's helper
+// Base URL of the helper that serves /zpl-to-pdf. Defaults to the same
+// 9100 we use for the Browser Print SDK, but on Windows users typically
+// run Zebra's official helper at 9100 (which doesn't expose /zpl-to-pdf)
+// and our shim alongside it on 9101 for the PDF preview only. The
+// `probeSecondaryShim()` call in refreshHelperInfo() switches this to
+// 9101 if it detects that situation.
+const PRIMARY_HELPER_URL   = 'http://127.0.0.1:9100';
+const SECONDARY_SHIM_URL   = 'http://127.0.0.1:9101';
+let pdfShimBaseUrl = PRIMARY_HELPER_URL;
 let defaultZplSnapshot = '';// most recent default written into the textarea
 
 // =============================================================================
@@ -270,17 +279,50 @@ async function refreshHelperInfo() {
     const conv = cfg.supportedConversions || {};
     pdfPreviewSupported = Array.isArray(conv.zpl) && conv.zpl.includes('pdf');
     helperIsShim = typeof cfg.version === 'string' && /shim/i.test(cfg.version);
+    pdfShimBaseUrl = PRIMARY_HELPER_URL;
     setText('apiInfo', `helper: ${platform}, API L${apiLevel}`, 'pill ok');
     log(`Browser Print: platform=${platform}, api_level=${apiLevel}, ` +
         `supportedConversions=${JSON.stringify(conv)}` +
         (helperIsShim ? ' (shim)' : ''));
+    // If the primary helper at 9100 doesn't expose ZPL→PDF (typical on
+    // Windows + macOS where Zebra's official helper handles printing
+    // but has no /zpl-to-pdf endpoint), check 9101 for our shim running
+    // alongside as the PDF-preview helper. See README §4a for setup.
+    if (!pdfPreviewSupported && !helperIsShim) {
+      await probeSecondaryShim();
+    }
     if (!pdfPreviewSupported) {
-      setPdfMessage('PDF preview unavailable. This requires browser-print-shim.py with zpl2pdf installed (see README §5b). The Print ZPL button and the upload-PDF section still work.', 'warn');
+      setPdfMessage('PDF preview unavailable. This requires browser-print-shim.py with zpl2pdf installed (see README §4a / §4b). The Print ZPL button and the upload-PDF section still work.', 'warn');
     }
   } catch (e) {
     setText('apiInfo', 'helper: unreachable', 'pill err');
     log('getApplicationConfiguration failed: ' + e, 'err');
     throw e;
+  }
+}
+
+// Best-effort probe of a secondary shim at 9101. Used when the primary
+// helper at 9100 is Zebra's official Browser Print (no /zpl-to-pdf) and
+// the user is running our shim alongside on a different port for the
+// PDF-preview feature only. Sets pdfShimBaseUrl + pdfPreviewSupported on
+// hit. Connection failure is silently absorbed — the page just leaves
+// PDF preview disabled.
+async function probeSecondaryShim() {
+  try {
+    const r = await fetch(`${SECONDARY_SHIM_URL}/config`, { cache: 'no-store' });
+    if (!r.ok) return;
+    const cfg = await r.json();
+    const conv = cfg.supportedConversions || {};
+    const isShim = typeof cfg.version === 'string' && /shim/i.test(cfg.version);
+    const supportsZplToPdf = Array.isArray(conv.zpl) && conv.zpl.includes('pdf');
+    if (isShim && supportsZplToPdf) {
+      pdfShimBaseUrl = SECONDARY_SHIM_URL;
+      pdfPreviewSupported = true;
+      log(`PDF preview: shim found at ${SECONDARY_SHIM_URL} (alongside primary helper at ${PRIMARY_HELPER_URL})`);
+    }
+  } catch (_e) {
+    // Connection refused / no server on 9101 — expected when no shim is
+    // running. Silently leave pdfPreviewSupported as it was.
   }
 }
 
@@ -302,7 +344,7 @@ async function discover() {
     // refreshHelperInfo above) to keep the official-helper path quiet.
     if (helperIsShim) {
       try {
-        const r = await fetch('http://127.0.0.1:9100/rediscover', { method: 'POST' });
+        const r = await fetch(`${PRIMARY_HELPER_URL}/rediscover`, { method: 'POST' });
         if (r.ok) log('rediscover: shim re-scanned USB + mDNS');
       } catch (_) { /* swallow — shim transient failure, proceed */ }
     }
@@ -1054,7 +1096,7 @@ async function generatePdfFromZpl() {
   setPdfMessage('Rendering…', 'info');
   $('generatePdf').disabled = true;
   try {
-    const r = await fetch(`http://127.0.0.1:9100/zpl-to-pdf?dpi=${encodeURIComponent(dpi)}`, {
+    const r = await fetch(`${pdfShimBaseUrl}/zpl-to-pdf?dpi=${encodeURIComponent(dpi)}`, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain' },
       body: zpl,

@@ -103,9 +103,11 @@ setup is required on Linux.)
 echo YOUR_KEY_HERE > app\feature-key.txt
 # 3. (optional, only for Generate-PDF preview) install the shim and zpl2pdf.
 #    PowerShell's default ExecutionPolicy blocks unsigned scripts; bypass it
-#    for this one invocation, or set CurrentUser policy once (see §5 Windows):
+#    for this one invocation, or set CurrentUser policy once (see §5 Windows).
+#    Run on port 9101 — Zebra's Browser Print helper holds 9100 and Windows
+#    won't let two processes share it (WinError 10013).
 powershell -ExecutionPolicy Bypass -File .\utils\install-zpl2pdf.ps1
-python utils\browser-print-shim.py
+python utils\browser-print-shim.py --http-port 9101 --no-mdns
 # 4. Serve the page in another terminal:
 python -m http.server 8000 -d app
 # open http://localhost:8000/browser-print.html in Chrome
@@ -121,10 +123,12 @@ python -m http.server 8000 -d app
 #    where to obtain one. Direct ZPL prints work without this; skip if
 #    that's all you need.
 echo YOUR_KEY_HERE > app/feature-key.txt
-# 3. (optional, only for Generate-PDF preview) install the shim and zpl2pdf:
+# 3. (optional, only for Generate-PDF preview) install the shim and zpl2pdf.
+#    Run on port 9101 — Zebra's Browser Print helper holds 9100 and macOS
+#    won't let two processes share it.
 brew install ghostscript                        # if not already installed
 ./utils/install-zpl2pdf.sh
-./utils/restart-shim.sh
+./utils/restart-shim.sh --http-port 9101 --no-mdns
 # 4. Serve the page in another terminal:
 python3 -m http.server 8000 -d app
 # open http://localhost:8000/browser-print.html in Chrome
@@ -186,7 +190,20 @@ discovers what the OS already sees.
 
 **PDF preview support.** The *Generate PDF* button in the page requires a `POST /zpl-to-pdf` endpoint that Zebra's official helper does NOT expose. If you want the live PDF preview on Windows or macOS, you have two options:
 
-1. **Run the shim alongside the official helper.** The shim listens on the same port (9100) by default — pick one to keep enabled at a time, or run the shim on a different port and adjust the page's fetch URL. The shim's `POST /zpl-to-pdf` endpoint shells out to a bundled `zpl2pdf` binary; install it via `.\utils\install-zpl2pdf.ps1` on Windows or `./utils/install-zpl2pdf.sh` on macOS. See §4b for shim setup details.
+1. **Run the shim alongside the official helper on port 9101.** Zebra's helper holds 9100 (and on Windows it grabs the port with `SO_EXCLUSIVEADDRUSE`, so the shim can't share it — you'll see `PermissionError: [WinError 10013]` if you try). Run the shim on 9101 instead — it serves `/zpl-to-pdf` only, and the page auto-discovers it there:
+
+   ```
+   # Windows  (PowerShell, in the repo root)
+   .\utils\install-zpl2pdf.ps1                                       # one-time
+   python utils\browser-print-shim.py --http-port 9101 --no-mdns
+
+   # macOS  (in the repo root)
+   ./utils/install-zpl2pdf.sh                                        # one-time
+   python3 utils/browser-print-shim.py --http-port 9101 --no-mdns
+   ```
+
+   Browser Print keeps handling printer enumeration, status, writes, and PDF→ZPL conversion (with the feature-key license check) on 9100; the shim handles ZPL→PDF on 9101. `--no-mdns` because `avahi-browse` isn't on Windows/macOS by default and the shim isn't enumerating printers in this mode anyway.
+
 2. **Skip the preview.** The *Print* button (direct ZPL) and the *Print uploaded PDF* skip-preview shortcut still work without the shim. The page detects this and shows "PDF preview unavailable" in the Generated PDF section instead of the iframe — graceful degradation, no errors.
 
 If you don't need the preview at all, the official helper is sufficient.

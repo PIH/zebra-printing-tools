@@ -1201,7 +1201,28 @@ def ensure_self_signed_cert(cert_path, key_path):
 
 
 def serve(port, ssl_ctx=None):
-    httpd = ThreadingHTTPServer(('127.0.0.1', port), Handler)
+    try:
+        httpd = ThreadingHTTPServer(('127.0.0.1', port), Handler)
+    except (OSError, PermissionError) as e:
+        # Port-conflict diagnostics. Linux returns OSError(EADDRINUSE),
+        # Windows returns PermissionError(WinError 10013) when another
+        # process holds the port with SO_EXCLUSIVEADDRUSE — Zebra's
+        # official Browser Print helper does this on 9100. Surface a
+        # human-readable hint instead of the raw stack trace, since this
+        # is a configuration mismatch, not a bug.
+        scheme = 'HTTPS' if ssl_ctx is not None else 'HTTP'
+        log.error('%s could not bind to 127.0.0.1:%d: %s', scheme, port, e)
+        if port == DEFAULT_HTTP_PORT:
+            log.error("Port %d is already in use. If you're on Windows or macOS "
+                      "with Zebra's official Browser Print helper running, that's "
+                      "what's holding the port. Either stop the helper, or run this "
+                      "shim on a different port for the PDF preview only:",
+                      port)
+            log.error('    python3 %s --http-port 9101 --no-mdns',
+                      os.path.basename(__file__))
+            log.error("The page auto-discovers a shim on 9101 when the primary helper "
+                      "at 9100 doesn't expose /zpl-to-pdf. See README §4a.")
+        raise
     if ssl_ctx is not None:
         httpd.socket = ssl_ctx.wrap_socket(httpd.socket, server_side=True)
         log.info('HTTPS listening on https://127.0.0.1:%d (self-signed; visit once and trust)', port)
