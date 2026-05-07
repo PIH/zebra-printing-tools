@@ -41,9 +41,11 @@ retrace the conversation.
   GX420t / ZD220 (203 dpi), ZD/ZT 600 dpi variants, etc. The page reads
   the head density and printer model from the selected printer's
   configuration (see §8b) and surfaces them in the printer info card;
-  the ZPL textarea defaults to a hardcoded 3"×2" layout sized to the
-  detected DPI, and users edit `^PW`/`^LL` directly in the textarea for
-  other media.
+  on printer-select the page pre-fills the ZPL textarea with a default
+  template whose `^PW` (print width) and `^LL` (label length) specify
+  a 3"×2" demo label, sized to the detected DPI. Label dimensions are
+  configured by `^PW`/`^LL` in the ZPL itself — edit those lines in
+  the textarea for other media.
 - **Client OSes:** primarily Windows; should also work on Ubuntu and macOS.
 - **Browser:** Chrome.
 - **Hard requirements:**
@@ -639,12 +641,14 @@ expectations.
 
 ## 7. ZPL primer (what the page emits)
 
-For a 3" × 2" label that's 900 × 600 dots at 300 dpi (or 609 × 406 at
-203 dpi). The page generates default ZPL based on a hardcoded 3"×2" layout
-scaled to the detected DPI, then writes it into the textarea where you can
-edit it freely (e.g. change `^PW` / `^LL` for different media). The sample
-below is what the textarea contains for a 300-dpi printer right after
-selection:
+A 3" × 2" label is 900 × 600 dots at 300 dpi (or 609 × 406 at 203 dpi).
+The label's physical dimensions are set by the `^PW` (print width) and
+`^LL` (label length) directives — both in dots — inside the ZPL itself.
+On printer-select, the page pre-fills the textarea with a default
+template whose `^PW`/`^LL` specify a 3"×2" demo, sized to the detected
+DPI. The textarea is the configuration surface — edit `^PW`/`^LL` for
+other media. The sample below is what the textarea contains for a
+300-dpi printer right after selection:
 
 **Default ZPL the page pre-fills (3"×2" at 300 dpi):**
 ```
