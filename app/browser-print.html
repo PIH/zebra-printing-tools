@@ -256,6 +256,7 @@ let lastPdfBytes = null;    // Uint8Array — last successful /zpl-to-pdf result
 let lastPdfUrl   = null;    // blob: URL backing the iframe + Download link
 let lastDetected = null;    // {dpi, dpm, widthDots, heightDots, model, …}
 let pdfPreviewSupported = false;   // from /config supportedConversions.zpl
+let helperIsShim = false;          // /config.version includes "shim" → our shim, not Zebra's helper
 let defaultZplSnapshot = '';// most recent default written into the textarea
 
 // =============================================================================
@@ -268,9 +269,11 @@ async function refreshHelperInfo() {
     const platform = cfg.platform ?? '?';
     const conv = cfg.supportedConversions || {};
     pdfPreviewSupported = Array.isArray(conv.zpl) && conv.zpl.includes('pdf');
+    helperIsShim = typeof cfg.version === 'string' && /shim/i.test(cfg.version);
     setText('apiInfo', `helper: ${platform}, API L${apiLevel}`, 'pill ok');
     log(`Browser Print: platform=${platform}, api_level=${apiLevel}, ` +
-        `supportedConversions=${JSON.stringify(conv)}`);
+        `supportedConversions=${JSON.stringify(conv)}` +
+        (helperIsShim ? ' (shim)' : ''));
     if (!pdfPreviewSupported) {
       setPdfMessage('PDF preview unavailable. This requires browser-print-shim.py with zpl2pdf installed (see README §5b). The Print ZPL button and the upload-PDF section still work.', 'warn');
     }
@@ -285,19 +288,23 @@ async function discover() {
   setText('connStatus', 'Scanning…');
   $('discover').disabled = true;
   try {
-    // Best-effort: trigger a re-scan on the shim. Zebra's official helper
-    // doesn't expose this endpoint and will 404; treat any failure as
-    // "not supported" and proceed.
-    try {
-      const r = await fetch('http://127.0.0.1:9100/rediscover', { method: 'POST' });
-      if (r.ok) log('rediscover: shim re-scanned USB + mDNS');
-    } catch (_) { /* swallow — shim may not be reachable yet */ }
-
     try {
       await refreshHelperInfo();
     } catch {
       setText('connStatus', 'Browser Print helper not reachable.', 'err');
       return;
+    }
+
+    // Trigger a re-scan on the shim if that's what we're talking to. Zebra's
+    // official helper doesn't expose /rediscover and will 404 *without* CORS
+    // headers, which Chrome surfaces as a CORS violation in the console even
+    // when the JS catches the failure. Gate on helperIsShim (set by
+    // refreshHelperInfo above) to keep the official-helper path quiet.
+    if (helperIsShim) {
+      try {
+        const r = await fetch('http://127.0.0.1:9100/rediscover', { method: 'POST' });
+        if (r.ok) log('rediscover: shim re-scanned USB + mDNS');
+      } catch (_) { /* swallow — shim transient failure, proceed */ }
     }
 
     let defaultDev = null;
