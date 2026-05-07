@@ -1188,47 +1188,61 @@ $('customPdfFile').addEventListener('change', () => {
   setText('customPdfStatus', '');
 });
 
+// Parse `^PW<dots>` / `^LL<dots>` out of the current ZPL textarea. The
+// textarea is the user-visible source of truth for label dimensions —
+// they tune it for their loaded media — so anchoring upload-PDF scaling
+// on it gives the same printable area the rest of the page assumes.
+//
+// Falls back to 3"×2" at the detected DPI (or 300 if undetected) — the
+// same defaults defaultZpl() uses, so a fresh-loaded page with no
+// editing prints sensibly even before any printer is selected.
+function fitToFromZplTextarea() {
+  const zplText = $('zpl').value;
+  const dpi = (lastDetected && lastDetected.dpi) || 300;
+  const pw = zplText.match(/\^PW(\d+)/);
+  const ll = zplText.match(/\^LL(\d+)/);
+  return {
+    width:  pw ? parseInt(pw[1], 10) : Math.round(3 * dpi),
+    height: ll ? parseInt(ll[1], 10) : Math.round(2 * dpi),
+  };
+}
+
 $('printCustomPdf').addEventListener('click', async () => {
   const file = $('customPdfFile').files[0];
   if (!file)   { setText('customPdfStatus', 'No file selected.', 'warn'); return; }
-  if (!zebra)  { setText('customPdfStatus', 'No printer.',       'err');  return; }
+  if (!device) { setText('customPdfStatus', 'No printer.',       'err');  return; }
 
-  setText('customPdfStatus', `Converting ${file.name}…`);
+  // Use action="print" with explicit `fitTo` rather than action="return"
+  // (getConvertedResource). Two reasons:
+  //
+  //   - getConvertedResource without `fitTo` rasterises at the helper's
+  //     default DPI; a typical 8.5×11" PDF then comes back as a tiny
+  //     image that prints in the corner of a 3×2" label.
+  //
+  //   - The canonical Zebra path for "print this PDF as a label" is
+  //     `printImageAsLabel(file, {keys})` (zebra_test.html line 337,
+  //     "Print PDF As Label" button) — which internally adds
+  //     `fitTo: {width: printer.printWidth, height: printer.labelLength}`
+  //     and calls convert with action="print". We replicate that, but
+  //     anchor `fitTo` on the user's `^PW`/`^LL` rather than the
+  //     printer's reported config — `printWidth` is print-HEAD width
+  //     (often wider than loaded media on ZD-series), and the
+  //     textarea reflects what the user actually wants printed.
+  const fitTo = fitToFromZplTextarea();
+  setText('customPdfStatus', `Sending ${file.name} (scale-to-fit ${fitTo.width}×${fitTo.height} dots)…`);
   const t0 = performance.now();
   try {
-    const response = await zebra.getConvertedResource(file, {
-      toFormat:   'zpl',
-      fromFormat: 'pdf',
-      // Zebra's helper expects keys keyed by source format — i.e.
-      // `{ keys: { pdf: "..." } }`, not `{ featureKey: "..." }`.
-      // Wire shape verified against `cagdemo.com/BrowserPrint/test/external/zebra_test.html`.
-      ...(featureKey ? { keys: { pdf: featureKey } } : {}),
+    await new Promise((res, rej) => {
+      device.convertAndSendFile(file, res, rej, {
+        ...(featureKey ? { keys: { pdf: featureKey } } : {}),
+        fitTo,
+      });
     });
-    // Zebra's helper returns `{ data: "<zpl>" }` (per every getConvertedResource
-    // example in cagdemo's zebra_test.html — `var label = "^XA^FO0,0" + response.data + "^XZ"`).
-    // Be defensive: accept either the wrapped object shape or a bare string.
-    const rawZpl = (response && typeof response === 'object' && 'data' in response)
-      ? response.data
-      : response;
-    if (typeof rawZpl !== 'string' || !rawZpl.length) {
-      throw new Error(`Helper returned unexpected shape: ${JSON.stringify(response)?.slice(0, 200)}`);
-    }
-    // For images the helper returns just the `^GFA` fragment — caller wraps
-    // with `^XA^FO0,0...^XZ`. For PDFs it tends to return a complete label
-    // already (or several `^XA...^XZ` blocks for multi-page input). Detect
-    // and wrap only when needed so we don't double-wrap a multi-page job.
-    const zpl = rawZpl.trimStart().startsWith('^XA')
-      ? rawZpl
-      : `^XA^FO0,0${rawZpl}^XZ`;
-    const dtConv = (performance.now() - t0).toFixed(0);
+    const dt = (performance.now() - t0).toFixed(0);
     setText('customPdfStatus',
-      `Converted ${zpl.length.toLocaleString()} chars in ${dtConv} ms; sending…`);
-    await devSend(device, zpl);
-    const dtTotal = (performance.now() - t0).toFixed(0);
-    setText('customPdfStatus',
-      `Printed ${zpl.length.toLocaleString()} chars in ${dtTotal} ms (incl. conversion).`,
+      `Printed ${file.name} (${file.size.toLocaleString()} bytes) in ${dt} ms.`,
       'ok');
-    log(`Custom PDF: ${file.name} → ${zpl.length.toLocaleString()} bytes ZPL, ${dtTotal} ms total`, 'ok');
+    log(`Custom PDF: ${file.name} → fit ${fitTo.width}×${fitTo.height} dots, ${dt} ms`, 'ok');
     setTimeout(refreshStatus, 350);
   } catch (e) {
     const msg = (e && e.message) || String(e);
