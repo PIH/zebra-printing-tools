@@ -213,8 +213,11 @@
 <pre id="log"></pre>
 
 <!-- ============================================================ Libraries -->
-<script src="BrowserPrint-3.1.250.min.js"></script>
-<script src="BrowserPrint-Zebra-1.1.250.min.js"></script>
+<!-- ../lib/zebra-browser-print.js is our MPL-2.0 vanilla-JS replacement
+     for Zebra's proprietary BrowserPrint-3.x.min.js + BrowserPrint-Zebra-
+     1.x.min.js. Same wire protocol, exposed as window.ZebraBrowserPrint.
+     Resolves with the page served from the repo root: see README §3. -->
+<script src="../lib/zebra-browser-print.js"></script>
 
 <script>
 'use strict';
@@ -233,25 +236,20 @@ function log(msg, cls) {
 }
 const setText = (id, t, cls) => { const e = $(id); e.textContent = t; if (cls !== undefined) e.className = cls; };
 
-// SDK is callback-based for BrowserPrint.* and device.* — wrap to promises.
-const promisify = (fn) => (...args) =>
-  new Promise((resolve, reject) => fn(...args, resolve, reject));
-
-const bpGetDefaultDevice = (type) =>
-  new Promise((res, rej) => BrowserPrint.getDefaultDevice(type, res, rej));
-const bpGetLocalDevices = (type) =>
-  new Promise((res, rej) => BrowserPrint.getLocalDevices(res, rej, type));
-const bpGetAppConfig = () =>
-  new Promise((res, rej) => BrowserPrint.getApplicationConfiguration(res, rej));
-const devSend = (dev, data) =>
-  new Promise((res, rej) => dev.send(data, res, rej));
-// Note: Zebra.Printer.* methods natively return Promises when called without callbacks.
+// Our MPL-2.0 client (../lib/zebra-browser-print.js) is promise-native.
+// These aliases used to be callback→Promise wrappers around Zebra's
+// proprietary SDK; kept under the same names so the rest of the page
+// reads naturally (`bpGetLocalDevices` says what it does) without
+// churning every call site.
+const bpGetDefaultDevice = (type) => ZebraBrowserPrint.getDefaultDevice(type);
+const bpGetLocalDevices  = (type) => ZebraBrowserPrint.getLocalDevices(type);
+const bpGetAppConfig     = ()     => ZebraBrowserPrint.getApplicationConfiguration();
 
 // =============================================================================
 // State
 // =============================================================================
-let device = null;          // BrowserPrint.Device
-let zebra  = null;          // Zebra.Printer wrapper
+let device = null;          // ZebraBrowserPrint.Device  (low-level transport: send/read/convertAndSendFile)
+let zebra  = null;          // ZebraBrowserPrint.Printer (high-level: getStatus/getConfiguration/getInfo/getSGD)
 let allDevices = [];
 let lastPdfBytes = null;    // Uint8Array — last successful /zpl-to-pdf result
 let lastPdfUrl   = null;    // blob: URL backing the iframe + Download link
@@ -441,7 +439,7 @@ async function discover() {
 function selectDevice(d) {
   const previousUidLocal = device ? device.uid : null;
   device = d;
-  zebra = d ? new Zebra.Printer(d) : null;
+  zebra = d ? new ZebraBrowserPrint.Printer(d) : null;
   const enabled = !!device;
   $('printZpl').disabled    = !enabled;
   $('generatePdf').disabled = !(enabled && pdfPreviewSupported);
@@ -945,9 +943,10 @@ function updateInfoResolution() {
 // =============================================================================
 // Diagnostics — raw send / read for arbitrary Zebra commands
 // =============================================================================
-// Bypasses the SDK's request queue (uses BrowserPrint.Device.send /
-// .read directly). Predictable behaviour, no contention with the SDK's
-// auto-fired getConfiguration or our own refreshStatus / detect calls.
+// Uses device.send / device.read directly, with a single-shot read
+// rather than the drain-until-quiet sendAndRead used by getStatus /
+// getConfiguration. Predictable single-frame behaviour for commands
+// that return a quick reply.
 //
 // Mode 'read'  — send + read response, decode + hex-dump in #rawResponse.
 // Mode 'write' — send only (for commands that don't reply: ^WC, ~JC, ~JR).
@@ -995,7 +994,7 @@ async function rawCommand(bytes, mode, label) {
   $('rawResponse').value = '';
   const t0 = performance.now();
   try {
-    await new Promise((res, rej) => device.send(bytes, res, rej));
+    await device.send(bytes);
     if (mode === 'write') {
       const dt = (performance.now() - t0).toFixed(0);
       $('rawResponse').value = `Sent ${bytes.length} byte${bytes.length === 1 ? '' : 's'} (${label}). No read requested.`;
@@ -1004,7 +1003,7 @@ async function rawCommand(bytes, mode, label) {
       return;
     }
     const resp = await Promise.race([
-      new Promise((res, rej) => device.read(res, rej)),
+      device.read(),
       new Promise((_, rej) => setTimeout(
         () => rej(new Error('read timeout')), RAW_READ_TIMEOUT_MS)),
     ]);
@@ -1261,11 +1260,9 @@ $('printCustomPdf').addEventListener('click', async () => {
   setText('customPdfStatus', `Sending ${file.name} (scale-to-fit ${fitTo.width}×${fitTo.height} dots)…`);
   const t0 = performance.now();
   try {
-    await new Promise((res, rej) => {
-      device.convertAndSendFile(file, res, rej, {
-        ...(featureKey ? { keys: { pdf: featureKey } } : {}),
-        fitTo,
-      });
+    await device.convertAndSendFile(file, {
+      ...(featureKey ? { keys: { pdf: featureKey } } : {}),
+      fitTo,
     });
     const dt = (performance.now() - t0).toFixed(0);
     setText('customPdfStatus',
@@ -1296,7 +1293,7 @@ $('printZpl').addEventListener('click', async () => {
   $('printZpl').disabled = true;
   setText('zplStatus', 'Sending…');
   try {
-    await devSend(device, zpl);
+    await device.send(zpl);
     setText('zplStatus', `Sent ${zpl.length} chars`);
     log(`print: device.send ${zpl.length} chars`);
     setTimeout(refreshStatus, 350);
@@ -1348,25 +1345,23 @@ $('printPdf').addEventListener('click', async () => {
   }
 });
 
-// Wrap the SDK's callback-style convertAndSendFile in a Promise. The
-// helper auto-detects the input format from the blob's MIME type, runs
-// the configured PDF→ZPL conversion (Zebra's licensed converter on
-// Windows/macOS, or the shim's Ghostscript pipeline on Linux), and
-// sends the resulting ZPL to the device.
+// Send a Blob (e.g. our shim-rendered PDF) through the helper's
+// /convert endpoint with action="print": the helper auto-detects the
+// input format from the blob's MIME type, runs the configured PDF→ZPL
+// conversion (Zebra's licensed converter on Windows/macOS, or the
+// shim's Ghostscript pipeline on Linux), and sends the resulting ZPL
+// to the device.
 //
 // The licensing key MUST be wrapped as `{ keys: { pdf: "<key>" } }` —
 // Zebra's helper looks for `options.keys.<fromFormat>`, NOT a flat
-// `featureKey`. The SDK itself is transparent (string `featureKey`
-// doesn't appear in BrowserPrint-3.1.250.min.js or the Zebra
-// extension); it forwards the options object to the helper verbatim,
-// so any name mismatch is invisible until the helper rejects it as
+// `featureKey`. Our MPL client (../lib/zebra-browser-print.js) just
+// forwards options to the helper verbatim — same as Zebra's SDK — so
+// any name mismatch is invisible until the helper rejects it as
 // "licensing key... none was provided". Canonical shape verified
 // against `cagdemo.com/BrowserPrint/test/external/zebra_test.html`
 // (`var feature_keys = {"pdf": "..."}` + `{keys: feature_keys}`).
 function convertAndSendFileViaSdk(blob) {
-  return new Promise((res, rej) => {
-    device.convertAndSendFile(blob, res, rej, featureKey ? { keys: { pdf: featureKey } } : {});
-  });
+  return device.convertAndSendFile(blob, featureKey ? { keys: { pdf: featureKey } } : {});
 }
 
 // =============================================================================

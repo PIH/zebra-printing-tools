@@ -83,8 +83,8 @@ sudo usermod -aG lp $USER && newgrp lp          # USB printer access (re-login i
 ./utils/install-zpl2pdf.sh                      # bundled ZPL→PDF binary (~60 MB)
 ./utils/restart-shim.sh                         # starts the shim in foreground; Ctrl-C to stop
 # in another terminal:
-python3 -m http.server 8000 -d app
-# open http://localhost:8000/browser-print.html in Chrome
+python3 -m http.server 8000
+# open http://localhost:8000/app/browser-print.html in Chrome
 ```
 
 (The shim ignores Zebra's PDF feature-key license check, so no key
@@ -111,8 +111,8 @@ setup is required on Linux.)
 powershell -ExecutionPolicy Bypass -File .\utils\install-zpl2pdf.ps1
 python utils\browser-print-shim.py --no-mdns
 # 4. Serve the page in another terminal:
-python -m http.server 8000 -d app
-# open http://localhost:8000/browser-print.html in Chrome
+python -m http.server 8000
+# open http://localhost:8000/app/browser-print.html in Chrome
 ```
 
 **macOS:**
@@ -129,8 +129,8 @@ brew install ghostscript                        # if not already installed
 ./utils/install-zpl2pdf.sh
 ./utils/restart-shim.sh --no-mdns
 # 4. Serve the page in another terminal:
-python3 -m http.server 8000 -d app
-# open http://localhost:8000/browser-print.html in Chrome
+python3 -m http.server 8000
+# open http://localhost:8000/app/browser-print.html in Chrome
 ```
 
 The sections below cover what each piece does and the trade-offs when something goes wrong. If you just want to print, the quickstart above is sufficient.
@@ -152,11 +152,13 @@ Once one of those is running, the rest is the same:
 
 1. **Make sure the printer is reachable.** USB Zebra connected and powered
    on, or its IP listed in the helper's config.
-2. **Serve the `app/` folder.** `127.0.0.1` is treated as a secure context
-   in Chrome, so the SDK can reach the helper from `file://` too:
+2. **Serve the repo root** (so the page can resolve both `app/` and the
+   sibling `lib/zebra-browser-print.js` it references). `127.0.0.1` is
+   treated as a secure context in Chrome, so the page reaches the
+   localhost helper from any served origin:
    ```
-   python3 -m http.server 8000 -d app
-   # → http://localhost:8000/browser-print.html
+   python3 -m http.server 8000
+   # → http://localhost:8000/app/browser-print.html
    ```
 3. Open the page, pick your printer in the dropdown — the printer info
    card populates with detected dpi / model / firmware, and the ZPL
