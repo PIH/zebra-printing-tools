@@ -17,8 +17,7 @@ Two operations on a single ZPL textarea:
    PDF back, displays it inline in an iframe. Useful for previewing
    labels without wasting media while iterating on the ZPL. The
    rendered PDF can then be printed via the helper's PDF→ZPL
-   conversion (same round-trip the form-driven pathway 2 used to
-   take), giving an apples-to-apples comparison with the direct
+   conversion, giving an apples-to-apples comparison with the direct
    primitive print.
 
 Plus a skip-preview shortcut: pick any pre-made PDF and route it
@@ -57,7 +56,7 @@ retrace the conversation.
   printing arbitrary PDFs. Default ZPL is a 3"×2" demo label with text and
   a Code 128 barcode of `A456123`; users edit the textarea directly for
   other media or content.
-- **Existing OpenMRS module behaviour:** server-side ZPL generation, then
+- **Existing OpenMRS module behavior:** server-side ZPL generation, then
   pushed to network printers over a raw TCP socket on port 9100. The
   client-side path needs a different transport but should reuse the same
   ZPL where possible.
@@ -73,7 +72,7 @@ The file is left in the directory only because it was already there.
 
 ### `window.print()` / OS print system via Zebra driver
 **Rejected.** Same dialog problem. Even with kiosk-print flags, you're at the
-mercy of Chrome's print policy and the driver's behaviour, and you give up
+mercy of Chrome's print policy and the driver's behavior, and you give up
 fine control over ZPL.
 
 ### WebUSB (talk to the printer's bulk endpoint directly from the page)
@@ -116,7 +115,7 @@ straight on the wire. The GX430t's firmware has no PDF interpreter, so any
 
 ## 3. Browser Print: architecture worth knowing
 
-Two separately-downloaded artefacts that are easy to confuse:
+Two separately-downloaded artifacts that are easy to confuse:
 
 | Artefact | What it is | Where it runs |
 |---|---|---|
@@ -281,7 +280,7 @@ the way.
 
 Modern Zebra Link-OS printers (the GX430t included, with current
 firmware) support **PDF Direct**: send a raw PDF to the printer over
-the wire and the firmware rasterises it on the device. From Browser
+the wire and the firmware rasterizes it on the device. From Browser
 Print this is one call:
 
 ```js
@@ -305,6 +304,18 @@ early in any PIH rollout. See §10.
 ---
 
 ## 5. Setup
+
+### Where the shim is needed
+
+The shim (`browser-print-shim.py`) is purely a Browser Print API substitute. Whether you need it depends on platform and which features you want:
+
+| Platform | For printing | For the *Generate PDF* preview |
+|---|---|---|
+| **Linux** | **Required** — Zebra doesn't currently distribute a Linux Browser Print build | **Required** (it's the same shim, plus the bundled `zpl2pdf` binary) |
+| **Windows** | Not needed — use Zebra's official Browser Print helper | **Optional** — install the shim + `zpl2pdf` only if you want the live PDF preview |
+| **macOS** | Not needed — use Zebra's official Browser Print helper | **Optional** — same as Windows |
+
+If you only want to print labels on Windows or macOS, install Zebra's official helper (§5a) and skip the shim entirely. The page detects which helper is running and gracefully shows "PDF preview unavailable" when only the official helper is present (the *Print* button and *Print uploaded PDF* skip-preview shortcut still work).
 
 ### Quickstart
 
@@ -566,7 +577,7 @@ When `gs` is on the PATH, the shim implements `POST /convert` end-to-end:
 
 If `options.action == "print"` (the default for `convertAndSendFile`) the
 shim *also* sends the converted ZPL to the device after returning the
-response — same behaviour as Zebra's helper.
+response — same behavior as Zebra's helper.
 
 Performance on a 3"×2" label at 300 dpi (900×600 pixels = 540 K px):
 threshold mode ~70 ms, dither mode ~200 ms (Floyd-Steinberg in pure
@@ -577,7 +588,7 @@ if it becomes a bottleneck.
 substitute (Ghostscript renders well, Floyd-Steinberg is the de facto
 standard halftone, the `^GF` compression is the same scheme), but small
 fidelity differences are inevitable, especially for content that exercises
-specialised halftoning (photographs, dense grayscale). For exact parity
+specialized halftoning (photographs, dense grayscale). For exact parity
 with what production clients will print, run the page against Zebra's
 official helper on Mac/Windows and compare on real labels.
 
@@ -805,7 +816,7 @@ generally-useful Zebra setup tool, not just a print demo.
 **Bypasses the SDK's request queue.** Diagnostics call
 `BrowserPrint.Device.send` / `.read` directly rather than going through
 `Zebra.Printer`'s queued `Request` machinery. That gives predictable
-single-shot behaviour and avoids contending with the SDK's internal
+single-shot behavior and avoids contending with the SDK's internal
 auto-fired `getConfiguration` (the `configTimeout` retry cycle) or the
 page's own `refreshStatus` / detection calls. Same approach already
 used by the print pathways' `device.send(zpl)`.
@@ -913,8 +924,6 @@ docs/superpowers/plans/             ← implementation plans (paired 1:1 with sp
 README.md                           ← this file
 zebra-browser-print-js-v31250/      ← Zebra SDK 3.1.250 + sample + bundled JSDoc
 printers.json                       ← optional: list of network printers for the shim
-print.min.js                        ← unused — Print.js still triggers a print dialog;
-                                      left in tree only because it was already here
 shim-cert.pem, shim-key.pem         ← generated by `--https`; gitignore them
 ```
 
