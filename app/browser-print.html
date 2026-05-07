@@ -377,14 +377,13 @@ function selectDevice(d) {
   if (d) {
     // Populate connection / UID immediately; detection fills the rest.
     updatePrinterInfo({ device: d });
-    refreshStatus();
-    // Fire alongside refreshStatus — the SDK serialises device requests
-    // internally (single queue per Printer), so they don't actually race
-    // each other on the wire.
-    // ZPL regeneration follows in the .then() below; detectPrinterCapabilities
-    // only updates lastDetected (used by the same-printer / different-printer
-    // branch logic).
-    detectPrinterCapabilities().then(() => {
+    // Serialise status → detection through refreshAll(). The SDK has a
+    // single per-Printer queue; firing status and detection together causes
+    // them to enqueue against each other. Each query through Zebra's
+    // official helper on Windows takes ~1500 ms, so queue contention
+    // tripped our per-call JS timeouts even though the SDK was still
+    // working. See decision-log entry 28.
+    refreshAll().then(() => {
       if (!defaultZplSnapshot) {
         regenerateDefaultZpl();
       } else if (device && device.uid === previousUidLocal) {
@@ -483,11 +482,32 @@ async function refreshStatus() {
 // and the static identity (model/firmware/dpi/dims). They go through the
 // SDK's request queue so they serialise on the wire even when fired
 // together; total wall-clock is ~2.5 s for the pair on a healthy printer.
-$('refreshPrinter').addEventListener('click', () => {
-  if (!zebra) return;
-  refreshStatus();
-  detectPrinterCapabilities();
-});
+// Serialised status + detection. Both go through the SDK's single
+// per-Printer command queue; running them sequentially keeps each call's
+// JS-side timeout aligned with the SDK actually picking the call off the
+// queue, instead of the call sitting behind a sibling that's still draining.
+// `refreshInFlight` blocks re-entry from the Refresh button while a prior
+// invocation is still running — a click during the in-flight window would
+// otherwise pile a fresh status query onto a queue that's still draining
+// the previous detection cycle, exactly the failure mode this function
+// exists to prevent.
+let refreshInFlight = false;
+async function refreshAll() {
+  if (!zebra || refreshInFlight) return;
+  refreshInFlight = true;
+  $('refreshPrinter').disabled = true;
+  try {
+    await refreshStatus();
+    await detectPrinterCapabilities();
+  } finally {
+    refreshInFlight = false;
+    // Re-enable only if a device is still selected. If the user switched
+    // away mid-flight (rare), setDiagEnabled will re-disable on the next tick.
+    $('refreshPrinter').disabled = !zebra;
+  }
+}
+
+$('refreshPrinter').addEventListener('click', refreshAll);
 
 // =============================================================================
 // Printer capability detection — head dpi + currently-configured label size
@@ -576,7 +596,7 @@ function parseDensity(s) {
   return { dpi: v, dpm: null };
 }
 
-// Detection has its own (generous) per-query timeout. Two reasons:
+// Detection has its own (generous) per-query timeout. Three reasons:
 //
 //  1. `getSGD` uses sendThenReadAllAvailable → readUntilStringReceived with
 //     an empty search string, which always recurses until /read returns
@@ -585,10 +605,21 @@ function parseDensity(s) {
 //  2. Our requests queue *behind* the auto-fired getConfiguration that the
 //     Zebra.Printer constructor kicks off (configTimeout) plus refreshStatus,
 //     adding ~500–800 ms of queue contention before our request can dispatch.
+//  3. Zebra's official Browser Print helper on Windows is consistently slow
+//     per read — ~1500 ms even for small queries. Detection's three queries
+//     (head.resolution.in_dpi, getConfiguration, getInfo) serialise on the
+//     SDK's per-Printer queue, so the third query starts ~3 s in. With the
+//     old 5 s timeout the third query had ~2 s of headroom — easy to bust
+//     when Windows latency spiked, which manifested as `info.firmware` not
+//     populating in the printer-info card. 12 s is plenty.
 //
-// 5 s per attempt × 1 attempt comfortably covers both. Failures here are
-// best-effort — the inputs keep their previous values, no red error pill.
-const DETECT_TIMEOUT_MS = 5000;
+// All three timeouts are wall-clock from when withDetectTimeout was called
+// (not from when the SDK actually dispatches), so the budget has to cover
+// the worst-case sum of (queue wait + helper read latency).
+//
+// Failures here are best-effort — the inputs keep their previous values,
+// no red error pill.
+const DETECT_TIMEOUT_MS = 12000;
 
 async function withDetectTimeout(fn, label) {
   return Promise.race([
