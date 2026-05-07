@@ -1306,7 +1306,16 @@ def refresh_devices(args):
         log.warning('  - Plug in a USB Zebra (and ensure your user has access to /dev/usb/lp*)')
         log.warning('  - Pass --network HOST[:PORT] for a network printer')
         log.warning('  - Add network printers to %s', args.config)
-        log.warning('  - Or install avahi-utils so the shim can auto-discover via mDNS')
+        if args.no_mdns:
+            log.warning('  - Re-enable mDNS auto-discovery by dropping --no-mdns')
+        elif not _have_avahi_browse():
+            log.warning('  - Or install avahi-utils so the shim can auto-discover via mDNS')
+        elif not args.all_mdns_printers:
+            log.warning('  - mDNS discovery ran but the Zebra-only filter dropped any non-Zebra '
+                        'printers found. Pass --all-mdns-printers to keep them.')
+        else:
+            log.warning("  - mDNS discovery ran but found no printers advertising "
+                        "'_pdl-datastream._tcp' on this network.")
 
 
 def main():
