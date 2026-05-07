@@ -260,11 +260,11 @@ let helperIsShim = false;          // /config.version includes "shim" → our sh
 // Where the shim lives. Default 9100 — also where Zebra's Browser Print
 // helper binds. They can't share the port:
 //   - On Linux (no Browser Print): shim runs at 9100, page gets everything from one URL.
-//   - On Windows/macOS (Browser Print at 9100): shim runs on a different port.
-//     The user picks one (9101 typically; or higher if 9101 falls inside a
-//     Hyper-V/WSL2 reserved range that bind()s with WinError 10013) and writes
-//     it to app/config.json under "shimPort". Both the page (loadConfig) and
-//     the shim (--http-port default) pick it up.
+//   - On Windows/macOS (Browser Print): shim runs on a different port. Note
+//     Browser Print binds *both* 9100 (HTTP) and 9101 (HTTPS) under one PID,
+//     each with SO_EXCLUSIVEADDRUSE on Windows — pick 9102 or higher. User
+//     writes the chosen port to app/config.json under "shimPort"; both the
+//     page (loadConfig) and the shim (--http-port default) pick it up.
 //
 // Note: the Browser Print SDK is hardcoded to 9100 in its .min.js, so SDK
 // calls (write/read/available/default) always go there regardless of

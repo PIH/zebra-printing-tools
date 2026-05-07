@@ -98,8 +98,9 @@ setup is required on Linux.)
 # 2. Create app\config.json with your PDF feature key + shim port. The key
 #    is required for PDF→ZPL prints through Zebra's official helper
 #    (license check); see §4a for where to obtain one. shimPort is where
-#    the shim lives — must differ from 9100 (Browser Print holds it).
-'{ "featureKey": "YOUR_KEY_HERE", "shimPort": 9101 }' | Set-Content app\config.json
+#    the shim lives — must avoid 9100 AND 9101 (Browser Print binds both,
+#    HTTP and HTTPS respectively). 9102 is the conventional next choice.
+'{ "featureKey": "YOUR_KEY_HERE", "shimPort": 9102 }' | Set-Content app\config.json
 # 3. (optional, only for Generate-PDF preview) install the shim and zpl2pdf.
 #    PowerShell's default ExecutionPolicy blocks unsigned scripts; bypass it
 #    for this one invocation, or set CurrentUser policy once (see §5 Windows).
@@ -116,8 +117,9 @@ python -m http.server 8000 -d app
 ```bash
 # 1. Install Zebra's Browser Print helper (one-time, .pkg installer):
 #    https://www.zebra.com/us/en/support-downloads/software/printer-software/browser-print.html
-# 2. Create app/config.json with your PDF feature key + shim port. See §4a.
-echo '{"featureKey": "YOUR_KEY_HERE", "shimPort": 9101}' > app/config.json
+# 2. Create app/config.json with your PDF feature key + shim port. shimPort
+#    must avoid 9100 AND 9101 (Browser Print binds both). See §4a.
+echo '{"featureKey": "YOUR_KEY_HERE", "shimPort": 9102}' > app/config.json
 # 3. (optional, only for Generate-PDF preview) install the shim and zpl2pdf.
 #    The shim picks up shimPort from app/config.json automatically.
 brew install ghostscript                        # if not already installed
@@ -208,7 +210,7 @@ One optional JSON file consumed by both the page (via fetch from the served orig
 
 ```json
 {
-  "shimPort": 9101,
+  "shimPort": 9102,
   "featureKey": "AbsQM…",
   "networkPrinters": [
     { "name": "Lab GX430t", "host": "192.168.1.42", "port": 9100 }
@@ -218,7 +220,7 @@ One optional JSON file consumed by both the page (via fetch from the served orig
 
 | Key | Read by | Purpose |
 |---|---|---|
-| `shimPort` | page + shim | Where the shim binds. Default 9100 (must differ when Browser Print already holds 9100; see Hyper-V note below). |
+| `shimPort` | page + shim | Where the shim binds. Default 9100. Must differ from 9100 *and* 9101 when Browser Print is running — Browser Print binds both (HTTP + HTTPS). See `shimPort` notes below. |
 | `featureKey` | page | Zebra PDF feature key for `convertAndSendFile`. |
 | `networkPrinters` | shim | List of `{name, host, port?}` entries; treated the same as `--network` flags. |
 
@@ -234,15 +236,27 @@ For an even cleaner path on supported printers, see PDF Direct in [internals §5
 
 ##### `shimPort`
 
-On Linux there's no Browser Print competing for 9100, so the shim runs there by default — leave `shimPort` unset (or omit `app/config.json` entirely). On Windows / macOS, Browser Print holds 9100 and the shim has to live elsewhere. 9101 is the conventional choice.
+On Linux there's no Browser Print competing for 9100, so the shim runs there by default — leave `shimPort` unset (or omit `app/config.json` entirely).
 
-Caveat: some Windows machines have 9101 (or other random port chunks) inside a Hyper-V / WSL2 / WinNAT reserved port range. If `WinError 10013` strikes a second time on 9101 itself, run
+On Windows / macOS, Browser Print binds **both 9100 (HTTP) and 9101 (HTTPS)** under one PID, each with `SO_EXCLUSIVEADDRUSE` on Windows — so neither port is available for the shim. **Pick 9102 or higher.** You can confirm what Browser Print is holding with:
+
+```powershell
+# Windows
+netstat -ano | findstr "9100 9101"
+
+# macOS
+lsof -nP -iTCP -sTCP:LISTEN | grep -E ':910[01]'
+```
+
+Both should show the same PID (a Java process — Browser Print is a Java helper).
+
+If you also hit `WinError 10013` on a port that *isn't* held by anything, your machine has that port inside a Hyper-V / WSL2 / WinNAT reserved range. Check with:
 
 ```powershell
 netsh interface ipv4 show excludedportrange protocol=tcp
 ```
 
-to see the reserved ranges, pick a port outside all of them (`19101`, `29101`, and `8181` are usually safe), and put that in `shimPort`. The shim and the page both pick it up.
+Pick a port outside any reserved range and outside the 9100/9101 pair, and put that in `shimPort`. The shim and the page both pick it up.
 
 ### 4b. The shim — `utils/browser-print-shim.py`
 

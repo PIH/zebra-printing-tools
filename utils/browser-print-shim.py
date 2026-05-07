@@ -1234,16 +1234,18 @@ def serve(port, ssl_ctx=None):
         # is a configuration mismatch, not a bug.
         scheme = 'HTTPS' if ssl_ctx is not None else 'HTTP'
         log.error('%s could not bind to 127.0.0.1:%d: %s', scheme, port, e)
-        log.error("Two common causes on Windows:")
-        log.error("  1. Zebra's Browser Print helper holds 9100 — keep it for printing, "
-                  "run this shim on a different port for the PDF preview alongside.")
-        log.error("  2. The port falls inside a Hyper-V / WSL2 reserved range. Check with:")
+        log.error("Common causes on Windows:")
+        log.error("  1. Zebra's Browser Print helper binds *both* 9100 (HTTP) and 9101")
+        log.error("     (HTTPS) under one PID with SO_EXCLUSIVEADDRUSE — pick 9102 or")
+        log.error("     higher when running this shim alongside Browser Print. Verify with:")
+        log.error("       netstat -ano | findstr \"9100 9101\"")
+        log.error("  2. (Less common) The port falls inside a Hyper-V / WSL2 / WinNAT")
+        log.error("     reserved range, even with nothing actively listening. Check with:")
         log.error("       netsh interface ipv4 show excludedportrange protocol=tcp")
-        log.error("Pick a port that's free and outside any reserved range, then either")
-        log.error("set it in app/config.json:")
-        log.error('    {"shimPort": 19101}')
+        log.error("Pick a free port and either set it in app/config.json:")
+        log.error('    {"shimPort": 9102}')
         log.error("(both the page and this shim read that file) or pass it inline:")
-        log.error('    python3 %s --http-port 19101 --no-mdns',
+        log.error('    python3 %s --http-port 9102 --no-mdns',
                   os.path.basename(__file__))
         log.error("See README §4a for the full config schema.")
         raise
