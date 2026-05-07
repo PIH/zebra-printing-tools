@@ -1199,7 +1199,10 @@ $('printCustomPdf').addEventListener('click', async () => {
     const zpl = await zebra.getConvertedResource(file, {
       toFormat:   'zpl',
       fromFormat: 'pdf',
-      ...(featureKey ? { featureKey } : {}),
+      // Zebra's helper expects keys keyed by source format — i.e.
+      // `{ keys: { pdf: "..." } }`, not `{ featureKey: "..." }`.
+      // Wire shape verified against `cagdemo.com/BrowserPrint/test/external/zebra_test.html`.
+      ...(featureKey ? { keys: { pdf: featureKey } } : {}),
     });
     const dtConv = (performance.now() - t0).toFixed(0);
     setText('customPdfStatus',
@@ -1266,14 +1269,14 @@ $('printPdf').addEventListener('click', async () => {
     setTimeout(refreshStatus, 350);
   } catch (e) {
     // Zebra's helper says "requires a licensing key and none was provided"
-    // when the SDK call passed no featureKey, vs. an "invalid"/"expired"
-    // wording when a key was sent but rejected. Distinguish in our hint:
+    // when options.keys.pdf is missing, vs. an "invalid"/"expired" wording
+    // when a key was sent but rejected. Distinguish in our hint:
     const errStr = String(e);
     let hint = '';
     if (/none was provided|no.+key|key.+not.+provided/i.test(errStr)) {
       hint = featureKey
-        ? ' (We loaded a featureKey from app/config.json but the helper says it didn\'t receive one — page log shows ' +
-          'the load result; check that featureKey is the right field name in config.json.)'
+        ? ' (Helper says no key was sent, but the page loaded one — likely a wire-shape ' +
+          'regression: the SDK must receive `{ keys: { pdf: featureKey } }`, not a flat `featureKey`.)'
         : ' (No featureKey is configured; set one in app/config.json — see README §4a.)';
     } else if (/license|key|invalid|expired/i.test(errStr)) {
       hint = ' (The helper received a featureKey but rejected it — could be wrong key, ' +
@@ -1291,9 +1294,19 @@ $('printPdf').addEventListener('click', async () => {
 // the configured PDF→ZPL conversion (Zebra's licensed converter on
 // Windows/macOS, or the shim's Ghostscript pipeline on Linux), and
 // sends the resulting ZPL to the device.
+//
+// The licensing key MUST be wrapped as `{ keys: { pdf: "<key>" } }` —
+// Zebra's helper looks for `options.keys.<fromFormat>`, NOT a flat
+// `featureKey`. The SDK itself is transparent (string `featureKey`
+// doesn't appear in BrowserPrint-3.1.250.min.js or the Zebra
+// extension); it forwards the options object to the helper verbatim,
+// so any name mismatch is invisible until the helper rejects it as
+// "licensing key... none was provided". Canonical shape verified
+// against `cagdemo.com/BrowserPrint/test/external/zebra_test.html`
+// (`var feature_keys = {"pdf": "..."}` + `{keys: feature_keys}`).
 function convertAndSendFileViaSdk(blob) {
   return new Promise((res, rej) => {
-    device.convertAndSendFile(blob, res, rej, featureKey ? { featureKey } : {});
+    device.convertAndSendFile(blob, res, rej, featureKey ? { keys: { pdf: featureKey } } : {});
   });
 }
 
@@ -1322,6 +1335,14 @@ function convertAndSendFileViaSdk(blob) {
 // at https://developer.zebra.com/content/browser-print-pdf — see README
 // §4a. The shim ignores the key (no license check), so Linux + shim
 // works without it.
+//
+// In `app/config.json` the field is the friendly singular `featureKey`
+// (a bare string). Wire-side, the SDK call sites must wrap it as
+// `{ keys: { pdf: featureKey } }` — Zebra's helper looks for
+// `options.keys.<fromFormat>`, not a flat `featureKey`. The wrap lives
+// in convertAndSendFileViaSdk and the upload-PDF call site; if either
+// is touched, keep that wrap in place or PDF prints will fail with
+// "licensing key... none was provided".
 //
 // `shimPort` / `shimHttpsPort` only matter when shim and Browser Print
 // coexist (Win/Mac): Browser Print binds 9100 + 9101 under one PID, so

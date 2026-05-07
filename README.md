@@ -239,6 +239,8 @@ Zebra's official helper enforces a `featureKey` license check on `device.convert
 
 We do not bundle a key. Zebra publishes a public demo key for prototyping at <https://developer.zebra.com/content/browser-print-pdf>. The same key also appears in plaintext in Zebra's public test harness — view-source on <https://cagdemo.com/BrowserPrint/test/external/zebra_test.html> and look for the `feature_keys` JS variable. For production rollouts, obtain a per-machine or per-fleet key directly from Zebra rather than depending on the demo key (Zebra can rotate or revoke it).
 
+The `featureKey` in `app/config.json` is just a bare string for ergonomics. The page wraps it into the canonical wire shape `{ keys: { pdf: "<key>" } }` before passing it to the SDK — that's what Zebra's helper actually looks for (`options.keys.<fromFormat>`), and a flat `featureKey` is silently dropped. The string `featureKey` does not appear anywhere in `BrowserPrint-3.1.250.min.js` or its Zebra extension; the SDK forwards your options object to the helper verbatim, so any shape mismatch only surfaces when the helper rejects with "licensing key... none was provided".
+
 For an even cleaner path on supported printers, see PDF Direct in [internals §5](docs/internals.md#5-pdf-direct-as-alternative-architecture) — firmware-side PDF rendering, no `featureKey` required at all.
 
 ##### `shimPort` / `shimHttpsPort`
