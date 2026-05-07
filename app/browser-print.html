@@ -1257,6 +1257,7 @@ $('printPdf').addEventListener('click', async () => {
   if (!device || !lastPdfBytes) return;
   $('printPdf').disabled = true;
   setText('pdfStatus', 'Sending…');
+  log(`print pdf: featureKey ${featureKey ? `present (${featureKey.length} chars)` : 'NOT SET'}, ${lastPdfBytes.length} bytes`);
   try {
     const blob = new Blob([lastPdfBytes], { type: 'application/pdf' });
     await convertAndSendFileViaSdk(blob);
@@ -1264,8 +1265,20 @@ $('printPdf').addEventListener('click', async () => {
     log(`print pdf: ${lastPdfBytes.length} bytes via convertAndSendFile`);
     setTimeout(refreshStatus, 350);
   } catch (e) {
-    const hint = /license|key/i.test(String(e))
-      ? ' (Zebra\'s official helper requires a PDF feature key; the shim ignores it.)' : '';
+    // Zebra's helper says "requires a licensing key and none was provided"
+    // when the SDK call passed no featureKey, vs. an "invalid"/"expired"
+    // wording when a key was sent but rejected. Distinguish in our hint:
+    const errStr = String(e);
+    let hint = '';
+    if (/none was provided|no.+key|key.+not.+provided/i.test(errStr)) {
+      hint = featureKey
+        ? ' (We loaded a featureKey from app/config.json but the helper says it didn\'t receive one — page log shows ' +
+          'the load result; check that featureKey is the right field name in config.json.)'
+        : ' (No featureKey is configured; set one in app/config.json — see README §4a.)';
+    } else if (/license|key|invalid|expired/i.test(errStr)) {
+      hint = ' (The helper received a featureKey but rejected it — could be wrong key, ' +
+             'wrong printer model, or Zebra revoked it.)';
+    }
     setText('pdfStatus', `Failed: ${e}${hint}`, 'err');
     log(`print pdf failed: ${e}`, 'err');
   } finally {
@@ -1318,16 +1331,53 @@ function convertAndSendFileViaSdk(blob) {
 let featureKey = '';
 
 async function loadConfig() {
-  let cfg;
+  let raw;
   try {
     const r = await fetch('config.json', { cache: 'no-store' });
     if (!r.ok) {
       log('Config: app/config.json not present — using defaults.');
       return;
     }
-    cfg = await r.json();
+    raw = await r.arrayBuffer();
   } catch (e) {
-    log(`Config: could not read app/config.json (${e.message || e}); using defaults.`, 'warn');
+    log(`Config: could not fetch app/config.json (${e.message || e}); using defaults.`, 'warn');
+    return;
+  }
+  // Diagnose the most common parse failures explicitly so the page log
+  // tells the user *what* is wrong, not just "could not parse".
+  const bytes = new Uint8Array(raw);
+  // Windows PowerShell 5.1's `Set-Content` writes UTF-16 LE with BOM by
+  // default — fetch+JSON.parse can't handle it. The README tells users to
+  // pass `-Encoding UTF8`, but if they didn't, this branch catches it
+  // with an actionable message instead of a cryptic JSON error.
+  const isUtf16LE = bytes.length >= 2 && bytes[0] === 0xFF && bytes[1] === 0xFE;
+  const isUtf16BE = bytes.length >= 2 && bytes[0] === 0xFE && bytes[1] === 0xFF;
+  if (isUtf16LE || isUtf16BE) {
+    log('Config: app/config.json is UTF-16-encoded; JSON parse needs UTF-8. ' +
+        'On Windows PowerShell 5.1, `Set-Content` defaults to UTF-16 — re-save with ' +
+        '`Set-Content -Encoding UTF8 app\\config.json` or use Notepad ' +
+        '→ File → Save As → "UTF-8" encoding.', 'err');
+    return;
+  }
+  let text;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch (e) {
+    log(`Config: app/config.json is not valid UTF-8 (${e.message || e}). ` +
+        'Re-save the file as UTF-8.', 'err');
+    return;
+  }
+  // Strip a leading UTF-8 BOM (some editors add it; JSON.parse rejects).
+  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+  let cfg;
+  try {
+    cfg = JSON.parse(text);
+  } catch (e) {
+    // Show the start of the file so the user can spot a smart quote /
+    // missing brace / etc. without diving into devtools.
+    const preview = text.slice(0, 80).replace(/\n/g, ' ');
+    log(`Config: app/config.json is not valid JSON (${e.message || e}). ` +
+        `First 80 chars: ${JSON.stringify(preview)}`, 'err');
     return;
   }
   const validPort = v => Number.isInteger(v) && v > 0 && v < 65536;
@@ -1352,7 +1402,16 @@ async function loadConfig() {
   }
   if (typeof cfg.featureKey === 'string' && cfg.featureKey.trim()) {
     featureKey = cfg.featureKey.trim();
-    log('Config: PDF feature key loaded.');
+    log(`Config: PDF feature key loaded (${featureKey.length} chars).`);
+  } else if ('featureKey' in cfg) {
+    log(`Config: featureKey=${JSON.stringify(cfg.featureKey)} is empty / not a string. ` +
+        'PDF→ZPL prints through Browser Print will fail with a license error.', 'warn');
+  } else {
+    // Informational, not warning — it's only a problem if you're using
+    // Browser Print as the active helper, and at this point we don't
+    // know which helper will answer.
+    log('Config: no featureKey set in app/config.json. PDF→ZPL prints through ' +
+        'Zebra Browser Print will fail (license check); the shim ignores it. See README §4a.');
   }
 }
 

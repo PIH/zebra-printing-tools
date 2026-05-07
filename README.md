@@ -100,7 +100,10 @@ setup is required on Linux.)
 #    (license check); see §4a for where to obtain one. shimPort is where
 #    the shim lives — must avoid 9100 AND 9101 (Browser Print binds both,
 #    HTTP and HTTPS respectively). 9102 is the conventional next choice.
-'{ "featureKey": "YOUR_KEY_HERE", "shimPort": 9102 }' | Set-Content app\config.json
+#    The `-Encoding UTF8` flag is REQUIRED — PowerShell 5.1's Set-Content
+#    defaults to UTF-16 LE, which fetch()+JSON.parse cannot read; the page
+#    will warn in its log if it sees a UTF-16 BOM.
+'{ "featureKey": "YOUR_KEY_HERE", "shimPort": 9102 }' | Set-Content -Encoding UTF8 app\config.json
 # 3. (optional, only for Generate-PDF preview) install the shim and zpl2pdf.
 #    PowerShell's default ExecutionPolicy blocks unsigned scripts; bypass it
 #    for this one invocation, or set CurrentUser policy once (see §5 Windows).
@@ -227,6 +230,8 @@ One optional JSON file consumed by both the page (via fetch from the served orig
 | `networkPrinters` | shim | List of `{name, host, port?}` entries; treated the same as `--network` flags. |
 
 The file is gitignored — never committed. The shim's `--http-port`, `--https-port`, and `--network` CLI flags still work and override file values when given.
+
+**Encoding gotcha (Windows):** save the file as UTF-8. PowerShell 5.1's `Set-Content` defaults to UTF-16 LE with BOM, which `fetch()` + `JSON.parse()` cannot read — the page log will say `Config: app/config.json is UTF-16-encoded; JSON parse needs UTF-8.` Fix by re-running with `Set-Content -Encoding UTF8`, or in Notepad use *File → Save As → Encoding: UTF-8*.
 
 ##### `featureKey`
 
