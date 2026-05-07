@@ -87,15 +87,24 @@ python3 -m http.server 8000 -d app
 # open http://localhost:8000/browser-print.html in Chrome
 ```
 
+(The shim ignores Zebra's PDF feature-key license check, so no key
+setup is required on Linux.)
+
 **Windows:**
 
 ```powershell
 # 1. Install Zebra's Browser Print helper (one-time, GUI installer):
 #    https://www.zebra.com/us/en/support-downloads/software/printer-software/browser-print.html
-# 2. (optional, only for Generate-PDF preview) install the shim and zpl2pdf:
+# 2. Drop a PDF feature key in app\feature-key.txt — required for PDF→ZPL
+#    prints through Zebra's official helper (license check). See §4a for
+#    where to obtain one. Direct ZPL prints work without this; you can
+#    skip it if you only need that path. Example with a key extracted
+#    from Zebra's public demo harness:
+echo YOUR_KEY_HERE > app\feature-key.txt
+# 3. (optional, only for Generate-PDF preview) install the shim and zpl2pdf:
 .\utils\install-zpl2pdf.ps1
 python utils\browser-print-shim.py
-# 3. Serve the page in another terminal:
+# 4. Serve the page in another terminal:
 python -m http.server 8000 -d app
 # open http://localhost:8000/browser-print.html in Chrome
 ```
@@ -105,11 +114,16 @@ python -m http.server 8000 -d app
 ```bash
 # 1. Install Zebra's Browser Print helper (one-time, .pkg installer):
 #    https://www.zebra.com/us/en/support-downloads/software/printer-software/browser-print.html
-# 2. (optional, only for Generate-PDF preview) install the shim and zpl2pdf:
+# 2. Drop a PDF feature key in app/feature-key.txt — required for PDF→ZPL
+#    prints through Zebra's official helper (license check). See §4a for
+#    where to obtain one. Direct ZPL prints work without this; skip if
+#    that's all you need.
+echo YOUR_KEY_HERE > app/feature-key.txt
+# 3. (optional, only for Generate-PDF preview) install the shim and zpl2pdf:
 brew install ghostscript                        # if not already installed
 ./utils/install-zpl2pdf.sh
 ./utils/restart-shim.sh
-# 3. Serve the page in another terminal:
+# 4. Serve the page in another terminal:
 python3 -m http.server 8000 -d app
 # open http://localhost:8000/browser-print.html in Chrome
 ```
@@ -179,18 +193,30 @@ If you don't need the preview at all, the official helper is sufficient.
 
 Zebra's official helper enforces a `featureKey` license check on
 `device.convertAndSendFile` for PDF input — both the *Print this PDF*
-button (under Generated PDF) and the *Print uploaded PDF* shortcut hit
-this code path. The page ships a public demo key (the same key Zebra
-hardcodes on its own test harness), so out-of-the-box prototyping works
-without any setup.
+button (under Generated PDF) and the *Print uploaded PDF* shortcut go
+through this code path. **Without a key, both PDF print buttons fail
+with a license error against the official helper.** Direct ZPL prints
+are unaffected.
 
-For production deployments where the demo key isn't acceptable,
-override it by dropping a one-line file at `app/feature-key.txt` —
-gitignored, loaded by the page at startup. If absent, the bundled demo
-key is used. There is no UI input; it's deployment config, not
-per-session state. The shim ignores the key entirely (no license
-check), so this only matters when you're driving Zebra's official
-helper.
+We do not bundle a key in this repo. To configure one, drop a one-line
+file at `app/feature-key.txt` (gitignored, loaded by the page at
+startup). There is no UI input; it's deployment config, not per-session
+state.
+
+**Where to obtain a key.** Zebra publishes a public demo key in
+plaintext on its own test harness for prototyping. The forum thread at
+<https://developer.zebra.com/forum/25874> directs developers to it.
+View source on
+<https://cagdemo.com/BrowserPrint/test/external/zebra_test.html> and
+search for `featureKey` to find the value. For production rollouts,
+obtain a per-machine or per-fleet key directly from Zebra rather than
+depending on the demo key (Zebra can rotate or revoke it).
+
+**The shim ignores the key entirely** (no license check on its
+`/convert` endpoint), so on Linux + shim, no key setup is required —
+both PDF print buttons work without `app/feature-key.txt` existing.
+The key only matters when the page is talking to Zebra's official
+helper on Windows or macOS.
 
 For an even cleaner path on supported printers, see PDF Direct in
 [internals §5](docs/internals.md#5-pdf-direct-as-alternative-architecture)
@@ -358,9 +384,10 @@ app/                                ← everything served to the browser
                                       Both .min.js files are from Zebra's "Browser Print SDK v3.1.250" download
                                       (see §7 Further reading for the developer-site link, JSDoc reference, and
                                       sample app); we vendor them so the page works offline.
-  feature-key.txt                   ← optional, gitignored: one-line override for the bundled public PDF demo key
-                                      (see §4a). Only matters when Zebra's official helper is the active
-                                      Browser Print helper; the shim ignores the key entirely.
+  feature-key.txt                   ← optional, gitignored: one-line PDF feature key (see §4a). Required for
+                                      PDF→ZPL prints when the active helper is Zebra's official one (Windows/
+                                      macOS); not needed when the shim is the active helper (it ignores the
+                                      license check).
 utils/                              ← server-side helpers (run by the user, not loaded in the browser)
   browser-print-shim.py             ← Linux dev shim (Browser Print API substitute) — supports USB and network transports;
                                       adds POST /zpl-to-pdf for ZPL→PDF preview when the bundled zpl2pdf is installed

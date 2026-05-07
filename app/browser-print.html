@@ -1098,39 +1098,36 @@ $('printPdf').addEventListener('click', async () => {
 // sends the resulting ZPL to the device.
 function convertAndSendFileViaSdk(blob) {
   return new Promise((res, rej) => {
-    device.convertAndSendFile(blob, res, rej, { featureKey });
+    device.convertAndSendFile(blob, res, rej, featureKey ? { featureKey } : {});
   });
 }
 
 // =============================================================================
 // PDF feature key — Zebra's licensed PDF→ZPL conversion in the official
-// helper checks this against the printer's serial number. Two ways to set it:
+// helper checks this against the printer's serial number. The two PDF→ZPL
+// print pathways (Generated-PDF "Print this PDF" and the upload-PDF
+// shortcut) both read the same module-level `featureKey`.
 //
-//   1. Drop a one-line file at app/feature-key.txt (gitignored) — preferred
-//      for production deployments. Loaded at startup from the same origin
-//      that serves the page.
-//   2. Fall back to the public demo key below — works for prototyping.
-//      Hardcoded in plaintext on Zebra's own public test harness, and
-//      Zebra's developer forum directs developers to extract it from there:
-//        https://cagdemo.com/BrowserPrint/test/external/zebra_test.html
-//        https://developer.zebra.com/forum/25874
-//      So committing it here is the same posture Zebra itself takes.
+// We do NOT bundle a key. To populate one, drop a one-line file at
+// app/feature-key.txt (gitignored). Loaded at startup from the same origin
+// that serves the page.
 //
-// The shim ignores the key entirely (it doesn't enforce the license check),
-// so on Linux + shim it's a no-op either way. The two PDF→ZPL print
-// pathways (Generated-PDF "Print this PDF" and the upload-PDF shortcut)
-// both read the same module-level `featureKey`.
+// For prototyping, Zebra hardcodes a public demo key in plaintext on its
+// own test harness — see README §4a for the location and how to extract
+// it. We deliberately don't ship a copy of the key in this repo, even
+// though it's public, to avoid any appearance of distributing licensed
+// material.
 //
-// Caveats: Zebra could rotate or revoke the demo key at any time. For
-// production rollouts on Windows/macOS, obtain a per-machine key from
-// Zebra (then drop it in app/feature-key.txt) OR skip conversion entirely
-// via PDF Direct (see README §4 — no key needed if the printer firmware
-// has PDF Direct enabled).
+// The shim ignores the key entirely (it doesn't enforce the license
+// check), so on Linux + shim no setup is required regardless. The key
+// only matters when the page is talking to Zebra's official helper on
+// Windows or macOS.
+//
+// Production-deployment alternative: PDF Direct skips helper-side
+// conversion entirely — no `featureKey` needed if the printer firmware
+// has it enabled. See README §4 / internals §5.
 // =============================================================================
-const DEFAULT_FEATURE_KEY =
-  'AbsQM…';
-
-let featureKey = DEFAULT_FEATURE_KEY;
+let featureKey = '';
 
 async function loadFeatureKey() {
   try {
@@ -1146,8 +1143,10 @@ async function loadFeatureKey() {
   } catch (_e) {
     // Network-style failure (offline, fetch blocked) — fall through.
   }
-  log('PDF feature key: using built-in public demo key ' +
-      '(drop your own in app/feature-key.txt to override)');
+  log('PDF feature key: not configured. Direct ZPL prints work without it. ' +
+      'For PDF→ZPL through Zebra\'s official helper (Windows/macOS), drop ' +
+      'a key in app/feature-key.txt — see README §4a for where to obtain ' +
+      'one. The bundled shim does not require a key.');
 }
 
 // =============================================================================

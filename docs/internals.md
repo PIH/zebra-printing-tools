@@ -332,21 +332,34 @@ a hint when the error message contains "license" or "key". The bundled
 shim's `/convert` endpoint ignores the feature key — it does the
 conversion via Ghostscript, no Zebra license required.
 
-**Resolution order, in `loadFeatureKey()` at startup:**
+**`loadFeatureKey()` at startup**: `fetch('feature-key.txt')` from the
+same origin (i.e. `app/feature-key.txt`, gitignored). One-line file
+containing the key. If 200 with non-empty body, the value populates
+the module-level `featureKey` and both print paths spread it into the
+SDK options. If absent / empty / network-failure, `featureKey` stays
+empty and both call sites suppress the option entirely (so the SDK
+sees no `featureKey` at all rather than an empty string).
 
-1. `fetch('feature-key.txt')` from the same origin (i.e.
-   `app/feature-key.txt`, gitignored). One-line file containing the
-   key. If 200 with non-empty body, that wins.
-2. Otherwise fall back to a hardcoded `DEFAULT_FEATURE_KEY` — the
-   *public demo key* Zebra hands out for prototyping at
-   `cagdemo.com/BrowserPrint/test/external/zebra_test.html`. So the
-   upload-PDF path works out-of-the-box against Zebra's helper without
-   any per-deployment config.
+The repo deliberately does **not** ship a key. For prototyping, Zebra
+publishes a public demo key in plaintext on its own test harness; the
+forum thread at <https://developer.zebra.com/forum/25874> points
+developers at it, and the value can be extracted by viewing source on
+<https://cagdemo.com/BrowserPrint/test/external/zebra_test.html>. We
+document the location in README §4a rather than committing a copy.
+Two reasons:
+
+1. Avoid any appearance of distributing licensed material from this
+   repo, even though the demo key is genuinely public.
+2. Force a deliberate per-deployment step. Anyone using Zebra's
+   official helper is in a production-shaped scenario where the demo
+   key is the wrong long-term answer anyway — they should be getting
+   a real key from Zebra.
 
 There is no UI input for the key; it's deployment configuration, not
 per-session state. The historical "PDF feature key" textbox + "remember
 in localStorage" checkbox was removed in May 2026 — see decision-log
-entry 25.
+entry 25. The bundled `DEFAULT_FEATURE_KEY` constant was removed
+shortly after — see entry 26.
 
 ---
 
