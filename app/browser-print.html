@@ -308,7 +308,24 @@ async function discover() {
     try { list = await bpGetLocalDevices('printer'); }
     catch (e) { log('getLocalDevices: ' + e, 'warn'); }
 
-    allDevices = list.slice();
+    // Defensive: Zebra's official Browser Print helper on Windows can return
+    // a partial Device record from /default?type=printer when the OS's
+    // default printer is non-Zebra (e.g. an HP inkjet). The record has no
+    // `uid` or `name`, so the SDK can't address it — every write fails with
+    // "No value for name" and any query times out. /available correctly
+    // filters to Zebras, but /default doesn't. Drop entries without a uid
+    // from both sources before populating the dropdown.
+    const isAddressable = d => d && typeof d.uid === 'string' && d.uid.length > 0;
+    const droppedFromList = list.filter(d => !isAddressable(d));
+    if (droppedFromList.length) {
+      log(`getLocalDevices returned ${droppedFromList.length} device(s) with no uid; ignoring.`, 'warn');
+    }
+    if (defaultDev && !isAddressable(defaultDev)) {
+      log('getDefaultDevice returned an entry with no uid (likely a non-Zebra OS default printer); ignoring.', 'warn');
+      defaultDev = null;
+    }
+
+    allDevices = list.filter(isAddressable);
     if (defaultDev && !allDevices.some(d => d.uid === defaultDev.uid)) {
       allDevices.unshift(defaultDev);
     }
