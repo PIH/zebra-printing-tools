@@ -24,10 +24,10 @@ $Tmp = Join-Path ([System.IO.Path]::GetTempPath()) ([System.IO.Path]::GetRandomF
 New-Item -ItemType Directory -Force -Path $Tmp | Out-Null
 try {
     $AssetPath = Join-Path $Tmp $Asset
-    Write-Host "Downloading $Asset…"
+    Write-Host "Downloading $Asset..."
     Invoke-WebRequest -Uri $Url -OutFile $AssetPath -UseBasicParsing
 
-    Write-Host "Fetching SHA256SUMS.txt…"
+    Write-Host "Fetching SHA256SUMS.txt..."
     $ChecksumsPath = Join-Path $Tmp 'SHA256SUMS.txt'
     try {
         Invoke-WebRequest -Uri $ChecksumsUrl -OutFile $ChecksumsPath -UseBasicParsing
@@ -40,13 +40,13 @@ try {
             }
             Write-Host "  SHA256 OK"
         } else {
-            Write-Warning "$Asset not listed in SHA256SUMS.txt — skipping verification."
+            Write-Warning "$Asset not listed in SHA256SUMS.txt - skipping verification."
         }
     } catch [Exception] {
-        Write-Warning 'SHA256SUMS.txt not available — skipping verification.'
+        Write-Warning 'SHA256SUMS.txt not available - skipping verification.'
     }
 
-    Write-Host "Extracting to $Dest\…"
+    Write-Host "Extracting to $Dest\..."
     New-Item -ItemType Directory -Force -Path $Dest | Out-Null
     Expand-Archive -Path $AssetPath -DestinationPath $Dest -Force
 
@@ -64,7 +64,7 @@ try {
     }
 
     if (-not (Test-Path $Exe)) {
-        throw "Extraction succeeded but zpl2pdf.exe not found at $Exe — archive may be corrupted or missing the binary."
+        throw "Extraction succeeded but zpl2pdf.exe not found at $Exe - archive may be corrupted or missing the binary."
     }
 
     Write-Host 'Installed:'
