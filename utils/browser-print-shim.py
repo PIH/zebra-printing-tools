@@ -392,11 +392,11 @@ def discover_usb_printers():
         # impossible to satisfy.
         return devices
     paths = sorted(set(glob.glob('/dev/usb/lp*') + glob.glob('/dev/usblp*')))
-    if not paths:
-        log.info('No USB printers found under /dev/usb/lp* or /dev/usblp*. '
-                 'Is a USB printer plugged in and the usblp kernel module loaded?')
-        return devices
-
+    # Per-device "discovered" / empty-state logging is centralised in
+    # refresh_devices(), which can compare against the prior set and stay
+    # silent on a steady-state rescan. We still surface actionable errors
+    # (missing /dev access, unexpected open failure) inline because those
+    # are not steady-state and a user wants to see them every time.
     for p in paths:
         if not os.access(p, os.R_OK | os.W_OK):
             log.warning('No read/write access to %s. Add your user to the lp group:', p)
@@ -407,9 +407,7 @@ def discover_usb_printers():
         model        = (info.get('ID_MODEL') or info.get('ID_MODEL_FROM_DATABASE') or '').replace('_', ' ').strip()
         serial       = info.get('ID_SERIAL_SHORT', '') or info.get('ID_SERIAL', '')
         try:
-            d = UsbDevice(p, manufacturer=manufacturer, model=model, serial=serial)
-            devices.append(d)
-            log.info('Discovered USB printer: %s', d.name)
+            devices.append(UsbDevice(p, manufacturer=manufacturer, model=model, serial=serial))
         except Exception as e:
             log.warning('Could not register %s: %s', p, e)
     return devices
@@ -442,13 +440,15 @@ def load_config(config_path):
 def load_network_printers(cfg):
     """Extract NetworkDevice objects from a parsed config dict's
     `networkPrinters` array. Each entry: {name, host, port? (default 9100)}.
+
+    Per-printer "configured" logging is centralised in refresh_devices() so
+    a steady-state rescan doesn't repeat the same lines on every tick;
+    schema errors stay inline because they're actionable and rare.
     """
     out = []
     for entry in cfg.get('networkPrinters', []) or []:
         try:
-            d = NetworkDevice(entry['name'], entry['host'], int(entry.get('port', 9100)))
-            out.append(d)
-            log.info('Configured network printer: %s @ %s:%s', d.name, d.host, d.port)
+            out.append(NetworkDevice(entry['name'], entry['host'], int(entry.get('port', 9100))))
         except Exception as e:
             log.warning('Bad networkPrinters entry %s: %s', entry, e)
     return out
@@ -1351,7 +1351,43 @@ def parse_network_arg(spec):
     return NetworkDevice(name, host.strip(), port)
 
 
+# Tracks the registered-device-uid set as of the previous refresh_devices()
+# call. None means "we have not refreshed yet" — on the first refresh we
+# always log a baseline so the operator sees what was discovered (or the
+# "no printers" guidance if nothing was). On subsequent refreshes we log
+# only on diff, so a long-lived shim doesn't repeat the same lines on
+# every --rescan-seconds tick.
+_PREV_REFRESH_UIDS = None
+
+
+def _log_no_printers(args):
+    if not IS_LINUX:
+        # Typical Win/Mac use is "shim alongside Browser Print" — the shim
+        # is purely a /zpl-to-pdf endpoint and has no need to register
+        # printers itself. BP enumerates them.
+        log.info('No printers registered with this shim. Browser Print presumably handles '
+                 'printer enumeration on this platform; this shim is only serving '
+                 '/zpl-to-pdf for the page\'s PDF preview.')
+        return
+    log.warning('No printers registered. Either:')
+    log.warning('  - Plug in a USB Zebra (and ensure your user has access to /dev/usb/lp*)')
+    log.warning('  - Pass --network HOST[:PORT] for a network printer')
+    log.warning('  - Add network printers to %s under "networkPrinters"', args.config)
+    if args.no_mdns:
+        log.warning('  - Re-enable mDNS auto-discovery by dropping --no-mdns')
+    elif not _have_avahi_browse():
+        log.warning('  - Or install avahi-utils so the shim can auto-discover via mDNS')
+    elif not args.all_mdns_printers:
+        log.warning('  - mDNS discovery ran but the Zebra-only filter dropped any non-Zebra '
+                    'printers found. Pass --all-mdns-printers to keep them.')
+    else:
+        log.warning("  - mDNS discovery ran but found no printers advertising "
+                    "'_pdl-datastream._tcp' on this network.")
+
+
 def refresh_devices(args):
+    global _PREV_REFRESH_UIDS
+
     devices = []
     if not args.no_usb:
         devices += discover_usb_printers()
@@ -1359,9 +1395,7 @@ def refresh_devices(args):
     # Network printers from --network CLI args
     for spec in (args.network or []):
         try:
-            d = parse_network_arg(spec)
-            devices.append(d)
-            log.info('Configured network printer (CLI): %s @ %s:%d', d.name, d.host, d.port)
+            devices.append(parse_network_arg(spec))
         except Exception as e:
             log.warning('Bad --network %r: %s', spec, e)
 
@@ -1376,32 +1410,36 @@ def refresh_devices(args):
             if (d.host, d.port) in explicit_keys:
                 continue
             devices.append(d)
-            log.info('Discovered network printer (mDNS): %s @ %s:%d', d.name, d.host, d.port)
+
+    new_uids = {d.uid for d in devices}
+    by_uid = {d.uid: d for d in devices}
+    is_first = _PREV_REFRESH_UIDS is None
+    prev_uids = _PREV_REFRESH_UIDS or set()
+    added_uids = new_uids - prev_uids
+    removed_uids = prev_uids - new_uids
 
     registry.replace(devices)
-    if not devices:
-        if not IS_LINUX:
-            # Typical Win/Mac use is "shim alongside Browser Print" — the
-            # shim is purely a /zpl-to-pdf endpoint and has no need to
-            # register printers itself. BP enumerates them.
-            log.info('No printers registered with this shim. Browser Print presumably handles '
-                     'printer enumeration on this platform; this shim is only serving '
-                     '/zpl-to-pdf for the page\'s PDF preview.')
+    _PREV_REFRESH_UIDS = new_uids
+
+    # Only log on first refresh (so the operator sees a baseline at startup)
+    # or when something actually changed. The shim ticks every
+    # --rescan-seconds; without this gate, an idle install with zero
+    # registered printers logs the same "no printers registered" block
+    # every 30 seconds.
+    if not (is_first or added_uids or removed_uids):
+        return
+
+    for uid in sorted(added_uids):
+        d = by_uid[uid]
+        if isinstance(d, NetworkDevice):
+            log.info('Network printer registered: %s @ %s:%d', d.name, d.host, d.port)
         else:
-            log.warning('No printers registered. Either:')
-            log.warning('  - Plug in a USB Zebra (and ensure your user has access to /dev/usb/lp*)')
-            log.warning('  - Pass --network HOST[:PORT] for a network printer')
-            log.warning('  - Add network printers to %s under "networkPrinters"', args.config)
-            if args.no_mdns:
-                log.warning('  - Re-enable mDNS auto-discovery by dropping --no-mdns')
-            elif not _have_avahi_browse():
-                log.warning('  - Or install avahi-utils so the shim can auto-discover via mDNS')
-            elif not args.all_mdns_printers:
-                log.warning('  - mDNS discovery ran but the Zebra-only filter dropped any non-Zebra '
-                            'printers found. Pass --all-mdns-printers to keep them.')
-            else:
-                log.warning("  - mDNS discovery ran but found no printers advertising "
-                            "'_pdl-datastream._tcp' on this network.")
+            log.info('USB printer registered: %s', d.name)
+    for uid in sorted(removed_uids):
+        log.info('Printer no longer registered: %s', uid)
+
+    if not devices:
+        _log_no_printers(args)
 
 
 def main():
