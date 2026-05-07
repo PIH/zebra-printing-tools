@@ -95,19 +95,17 @@ setup is required on Linux.)
 ```powershell
 # 1. Install Zebra's Browser Print helper (one-time, GUI installer):
 #    https://www.zebra.com/us/en/support-downloads/software/printer-software/browser-print.html
-# 2. Drop a PDF feature key in app\feature-key.txt — required for PDF→ZPL
-#    prints through Zebra's official helper (license check). See §4a for
-#    where to obtain one. Direct ZPL prints work without this; you can
-#    skip it if you only need that path. Example with a key extracted
-#    from Zebra's public demo harness:
-echo YOUR_KEY_HERE > app\feature-key.txt
+# 2. Create app\config.json with your PDF feature key + shim port. The key
+#    is required for PDF→ZPL prints through Zebra's official helper
+#    (license check); see §4a for where to obtain one. shimPort is where
+#    the shim lives — must differ from 9100 (Browser Print holds it).
+'{ "featureKey": "YOUR_KEY_HERE", "shimPort": 9101 }' | Set-Content app\config.json
 # 3. (optional, only for Generate-PDF preview) install the shim and zpl2pdf.
 #    PowerShell's default ExecutionPolicy blocks unsigned scripts; bypass it
 #    for this one invocation, or set CurrentUser policy once (see §5 Windows).
-#    Run on port 9101 — Zebra's Browser Print helper holds 9100 and Windows
-#    won't let two processes share it (WinError 10013).
+#    The shim picks up shimPort from app\config.json automatically.
 powershell -ExecutionPolicy Bypass -File .\utils\install-zpl2pdf.ps1
-python utils\browser-print-shim.py --http-port 9101 --no-mdns
+python utils\browser-print-shim.py --no-mdns
 # 4. Serve the page in another terminal:
 python -m http.server 8000 -d app
 # open http://localhost:8000/browser-print.html in Chrome
@@ -118,17 +116,13 @@ python -m http.server 8000 -d app
 ```bash
 # 1. Install Zebra's Browser Print helper (one-time, .pkg installer):
 #    https://www.zebra.com/us/en/support-downloads/software/printer-software/browser-print.html
-# 2. Drop a PDF feature key in app/feature-key.txt — required for PDF→ZPL
-#    prints through Zebra's official helper (license check). See §4a for
-#    where to obtain one. Direct ZPL prints work without this; skip if
-#    that's all you need.
-echo YOUR_KEY_HERE > app/feature-key.txt
+# 2. Create app/config.json with your PDF feature key + shim port. See §4a.
+echo '{"featureKey": "YOUR_KEY_HERE", "shimPort": 9101}' > app/config.json
 # 3. (optional, only for Generate-PDF preview) install the shim and zpl2pdf.
-#    Run on port 9101 — Zebra's Browser Print helper holds 9100 and macOS
-#    won't let two processes share it.
+#    The shim picks up shimPort from app/config.json automatically.
 brew install ghostscript                        # if not already installed
 ./utils/install-zpl2pdf.sh
-./utils/restart-shim.sh --http-port 9101 --no-mdns
+./utils/restart-shim.sh --no-mdns
 # 4. Serve the page in another terminal:
 python3 -m http.server 8000 -d app
 # open http://localhost:8000/browser-print.html in Chrome
@@ -190,56 +184,65 @@ discovers what the OS already sees.
 
 **PDF preview support.** The *Generate PDF* button in the page requires a `POST /zpl-to-pdf` endpoint that Zebra's official helper does NOT expose. If you want the live PDF preview on Windows or macOS, you have two options:
 
-1. **Run the shim alongside the official helper on port 9101.** Zebra's helper holds 9100 (and on Windows it grabs the port with `SO_EXCLUSIVEADDRUSE`, so the shim can't share it — you'll see `PermissionError: [WinError 10013]` if you try). Run the shim on 9101 instead — it serves `/zpl-to-pdf` only, and the page auto-discovers it there:
+1. **Run the shim alongside the official helper on a different port.** Zebra's helper holds 9100 (and on Windows it grabs the port with `SO_EXCLUSIVEADDRUSE`, so the shim can't share it — you'll see `PermissionError: [WinError 10013]` if you try). Configure the shim's port via `app/config.json` (see "Runtime config" below); both the page and the shim read it. The shim then serves `/zpl-to-pdf` and the page auto-discovers it at the configured port:
 
    ```
    # Windows  (PowerShell, in the repo root)
    .\utils\install-zpl2pdf.ps1                                       # one-time
-   python utils\browser-print-shim.py --http-port 9101 --no-mdns
+   python utils\browser-print-shim.py --no-mdns
 
    # macOS  (in the repo root)
    ./utils/install-zpl2pdf.sh                                        # one-time
-   python3 utils/browser-print-shim.py --http-port 9101 --no-mdns
+   python3 utils/browser-print-shim.py --no-mdns
    ```
 
-   Browser Print keeps handling printer enumeration, status, writes, and PDF→ZPL conversion (with the feature-key license check) on 9100; the shim handles ZPL→PDF on 9101. `--no-mdns` because `avahi-browse` isn't on Windows/macOS by default and the shim isn't enumerating printers in this mode anyway.
+   Browser Print keeps handling printer enumeration, status, writes, and PDF→ZPL conversion (with the feature-key license check) on 9100; the shim handles ZPL→PDF on the configured `shimPort`. `--no-mdns` because `avahi-browse` isn't on Windows/macOS by default and the shim isn't enumerating printers in this mode anyway.
 
 2. **Skip the preview.** The *Print* button (direct ZPL) and the *Print uploaded PDF* skip-preview shortcut still work without the shim. The page detects this and shows "PDF preview unavailable" in the Generated PDF section instead of the iframe — graceful degradation, no errors.
 
 If you don't need the preview at all, the official helper is sufficient.
 
-#### PDF feature key
+#### Runtime config — `app/config.json`
 
-Zebra's official helper enforces a `featureKey` license check on
-`device.convertAndSendFile` for PDF input — both the *Print this PDF*
-button (under Generated PDF) and the *Print uploaded PDF* shortcut go
-through this code path. **Without a key, both PDF print buttons fail
-with a license error against the official helper.** Direct ZPL prints
-are unaffected.
+One optional JSON file consumed by both the page (via fetch from the served origin) and the shim (via filesystem). All keys are optional — a missing file means all defaults.
 
-We do not bundle a key in this repo. To configure one, drop a one-line
-file at `app/feature-key.txt` (gitignored, loaded by the page at
-startup). There is no UI input; it's deployment config, not per-session
-state.
+```json
+{
+  "shimPort": 9101,
+  "featureKey": "AbsQM…",
+  "networkPrinters": [
+    { "name": "Lab GX430t", "host": "192.168.1.42", "port": 9100 }
+  ]
+}
+```
 
-**Where to obtain a key.** Zebra publishes a public demo key for
-prototyping at <https://developer.zebra.com/content/browser-print-pdf>.
-The same key also appears in plaintext in Zebra's public test harness
-— view-source on
-<https://cagdemo.com/BrowserPrint/test/external/zebra_test.html> and
-look for the `feature_keys` JS variable. For production rollouts,
-obtain a per-machine or per-fleet key directly from Zebra rather than
-depending on the demo key (Zebra can rotate or revoke it).
+| Key | Read by | Purpose |
+|---|---|---|
+| `shimPort` | page + shim | Where the shim binds. Default 9100 (must differ when Browser Print already holds 9100; see Hyper-V note below). |
+| `featureKey` | page | Zebra PDF feature key for `convertAndSendFile`. |
+| `networkPrinters` | shim | List of `{name, host, port?}` entries; treated the same as `--network` flags. |
 
-**The shim ignores the key entirely** (no license check on its
-`/convert` endpoint), so on Linux + shim, no key setup is required —
-both PDF print buttons work without `app/feature-key.txt` existing.
-The key only matters when the page is talking to Zebra's official
-helper on Windows or macOS.
+The file is gitignored — never committed. The shim's `--http-port` and `--network` CLI flags still work and override file values when given.
 
-For an even cleaner path on supported printers, see PDF Direct in
-[internals §5](docs/internals.md#5-pdf-direct-as-alternative-architecture)
-— firmware-side PDF rendering, no `featureKey` required at all.
+##### `featureKey`
+
+Zebra's official helper enforces a `featureKey` license check on `device.convertAndSendFile` for PDF input — both the *Print this PDF* button (under Generated PDF) and the *Print uploaded PDF* shortcut go through this code path. **Without a key, both PDF print buttons fail with a license error against the official helper.** Direct ZPL prints are unaffected. The shim ignores the key (no license check on its `/convert` endpoint), so Linux + shim works without it.
+
+We do not bundle a key. Zebra publishes a public demo key for prototyping at <https://developer.zebra.com/content/browser-print-pdf>. The same key also appears in plaintext in Zebra's public test harness — view-source on <https://cagdemo.com/BrowserPrint/test/external/zebra_test.html> and look for the `feature_keys` JS variable. For production rollouts, obtain a per-machine or per-fleet key directly from Zebra rather than depending on the demo key (Zebra can rotate or revoke it).
+
+For an even cleaner path on supported printers, see PDF Direct in [internals §5](docs/internals.md#5-pdf-direct-as-alternative-architecture) — firmware-side PDF rendering, no `featureKey` required at all.
+
+##### `shimPort`
+
+On Linux there's no Browser Print competing for 9100, so the shim runs there by default — leave `shimPort` unset (or omit `app/config.json` entirely). On Windows / macOS, Browser Print holds 9100 and the shim has to live elsewhere. 9101 is the conventional choice.
+
+Caveat: some Windows machines have 9101 (or other random port chunks) inside a Hyper-V / WSL2 / WinNAT reserved port range. If `WinError 10013` strikes a second time on 9101 itself, run
+
+```powershell
+netsh interface ipv4 show excludedportrange protocol=tcp
+```
+
+to see the reserved ranges, pick a port outside all of them (`19101`, `29101`, and `8181` are usually safe), and put that in `shimPort`. The shim and the page both pick it up.
 
 ### 4b. The shim — `utils/browser-print-shim.py`
 
@@ -317,10 +320,10 @@ python3 utils/browser-print-shim.py --network 192.168.1.42
 python3 utils/browser-print-shim.py --network 'Lab GX430t=192.168.1.42:9100' \
                                     --network 'Pharmacy GX430t=192.168.1.43'
 ```
-or in a `utils/printers.json` next to the shim:
+or in `app/config.json` under `networkPrinters` (same file the page reads — see §4a "Runtime config"):
 ```json
 {
-  "network": [
+  "networkPrinters": [
     { "name": "Lab GX430t",      "host": "192.168.1.42", "port": 9100 },
     { "name": "Pharmacy GX430t", "host": "192.168.1.43" }
   ]
@@ -334,7 +337,7 @@ can do the `~HS` query/response cycle on the same connection.
 
 ##### Auto-discovery via mDNS (Avahi)
 
-If `avahi-browse` is on PATH (Linux: `sudo apt install avahi-utils` if it isn't), the shim auto-discovers Zebra printers advertising `_pdl-datastream._tcp` (port 9100, raw / JetDirect — the service Zebra printers use for ZPL printing) at startup and on each periodic rescan. Discovered printers appear in the dropdown alongside any registered via `--network` or `printers.json`. Pass `--no-mdns` to disable.
+If `avahi-browse` is on PATH (Linux: `sudo apt install avahi-utils` if it isn't), the shim auto-discovers Zebra printers advertising `_pdl-datastream._tcp` (port 9100, raw / JetDirect — the service Zebra printers use for ZPL printing) at startup and on each periodic rescan. Discovered printers appear in the dropdown alongside any registered via `--network` or `app/config.json`. Pass `--no-mdns` to disable.
 
 The page's **Refresh printer list** button POSTs to `/rediscover` on the shim, which re-runs the USB + mDNS scan synchronously — no shim restart needed when you plug in a new network printer.
 
@@ -403,7 +406,7 @@ For the technical detail of how the shim's PDF→ZPL conversion works internally
   needs `lp` group membership. We did *not* need the udev rule / `usblp`
   blacklist required for the WebUSB approach, because the shim cooperates
   with the kernel driver instead of competing with it.
-- Network printers are added via `--network HOST[:PORT]` or `printers.json`.
+- Network printers are added via `--network HOST[:PORT]` or `app/config.json` (see §4a).
 - The printer can also be added to CUPS for other applications; the shim
   doesn't interact with CUPS at all (it talks straight to `/dev/usb/lp*` or
   a TCP socket).
@@ -420,10 +423,8 @@ app/                                ← everything served to the browser
                                       Both .min.js files are from Zebra's "Browser Print SDK v3.1.250" download
                                       (see §7 Further reading for the developer-site link, JSDoc reference, and
                                       sample app); we vendor them so the page works offline.
-  feature-key.txt                   ← optional, gitignored: one-line PDF feature key (see §4a). Required for
-                                      PDF→ZPL prints when the active helper is Zebra's official one (Windows/
-                                      macOS); not needed when the shim is the active helper (it ignores the
-                                      license check).
+  config.json                       ← optional, gitignored: runtime config (shimPort, featureKey, networkPrinters).
+                                      Read by both the page (via fetch) and the shim (via filesystem). See §4a.
 utils/                              ← server-side helpers (run by the user, not loaded in the browser)
   browser-print-shim.py             ← Linux dev shim (Browser Print API substitute) — supports USB and network transports;
                                       adds POST /zpl-to-pdf for ZPL→PDF preview when the bundled zpl2pdf is installed
@@ -431,7 +432,6 @@ utils/                              ← server-side helpers (run by the user, no
   install-zpl2pdf.ps1               ← Windows installer for the bundled zpl2pdf binary
   restart-shim.sh                   ← dev helper: pkill + restart the shim in one step
   bin/                              ← installed zpl2pdf binaries (.gitignored, populated by install-zpl2pdf.{sh,ps1})
-  printers.json                     ← optional: list of network printers for the shim
   shim-cert.pem, shim-key.pem       ← generated by `--https`; gitignore them
 docs/internals.md                   ← implementation reference for future maintainers
 docs/decision-log.md                ← design history and rationale (alternatives surveyed, decision log)

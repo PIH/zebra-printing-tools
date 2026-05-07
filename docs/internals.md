@@ -332,13 +332,15 @@ a hint when the error message contains "license" or "key". The bundled
 shim's `/convert` endpoint ignores the feature key — it does the
 conversion via Ghostscript, no Zebra license required.
 
-**`loadFeatureKey()` at startup**: `fetch('feature-key.txt')` from the
-same origin (i.e. `app/feature-key.txt`, gitignored). One-line file
-containing the key. If 200 with non-empty body, the value populates
-the module-level `featureKey` and both print paths spread it into the
-SDK options. If absent / empty / network-failure, `featureKey` stays
-empty and both call sites suppress the option entirely (so the SDK
-sees no `featureKey` at all rather than an empty string).
+**`loadConfig()` at startup**: `fetch('config.json')` from the same
+origin (i.e. `app/config.json`, gitignored). The page reads
+`featureKey` and `shimPort`; the shim reads the same file via
+filesystem for `shimPort` and `networkPrinters`. If `featureKey` is
+present and non-empty, the value populates the module-level variable
+and both print paths spread it into the SDK options. If absent /
+empty / network-failure, `featureKey` stays empty and both call sites
+suppress the option entirely (so the SDK sees no `featureKey` at all
+rather than an empty string).
 
 The repo deliberately does **not** ship a key. For prototyping, Zebra
 publishes a public demo key at
@@ -359,7 +361,8 @@ There is no UI input for the key; it's deployment configuration, not
 per-session state. The historical "PDF feature key" textbox + "remember
 in localStorage" checkbox was removed in May 2026 — see decision-log
 entry 25. The bundled `DEFAULT_FEATURE_KEY` constant was removed
-shortly after — see entry 26.
+shortly after — see entry 26. The standalone `app/feature-key.txt`
+was consolidated into `app/config.json` — see entry 32.
 
 ---
 
@@ -529,9 +532,10 @@ IPv6 entries (fields[2] != `'IPv4'`) are skipped to avoid duplicate
 registrations for the same printer. By default, parsed entries are filtered
 to Zebra ones — the lowercased concatenation of service name + TXT records
 must contain "zebra" or the entry is dropped. `--all-mdns-printers` disables
-this; explicit `--network` / `printers.json` registrations bypass it.
+this; explicit `--network` / `app/config.json` registrations bypass it.
 Discovered devices are deduped against any already-registered `(host, port)`
-pairs from `--network` CLI args or `printers.json`; explicit registrations
+pairs from `--network` CLI args or `app/config.json` (`networkPrinters`
+array); explicit registrations
 win on collision so users can override an auto-discovered display name. Any
 failure (missing `avahi-browse`, timeout, parse error) is swallowed — the
 function returns an empty list rather than raising.

@@ -257,14 +257,21 @@ let lastPdfUrl   = null;    // blob: URL backing the iframe + Download link
 let lastDetected = null;    // {dpi, dpm, widthDots, heightDots, model, …}
 let pdfPreviewSupported = false;   // from /config supportedConversions.zpl
 let helperIsShim = false;          // /config.version includes "shim" → our shim, not Zebra's helper
-// Base URL of the helper that serves /zpl-to-pdf. Defaults to the same
-// 9100 we use for the Browser Print SDK, but on Windows users typically
-// run Zebra's official helper at 9100 (which doesn't expose /zpl-to-pdf)
-// and our shim alongside it on 9101 for the PDF preview only. The
-// `probeSecondaryShim()` call in refreshHelperInfo() switches this to
-// 9101 if it detects that situation.
-const PRIMARY_HELPER_URL   = 'http://127.0.0.1:9100';
-const SECONDARY_SHIM_URL   = 'http://127.0.0.1:9101';
+// Where the shim lives. Default 9100 — also where Zebra's Browser Print
+// helper binds. They can't share the port:
+//   - On Linux (no Browser Print): shim runs at 9100, page gets everything from one URL.
+//   - On Windows/macOS (Browser Print at 9100): shim runs on a different port.
+//     The user picks one (9101 typically; or higher if 9101 falls inside a
+//     Hyper-V/WSL2 reserved range that bind()s with WinError 10013) and writes
+//     it to app/config.json under "shimPort". Both the page (loadConfig) and
+//     the shim (--http-port default) pick it up.
+//
+// Note: the Browser Print SDK is hardcoded to 9100 in its .min.js, so SDK
+// calls (write/read/available/default) always go there regardless of
+// shimPort. shimPort only governs where /zpl-to-pdf is sent.
+const PRIMARY_HELPER_URL = 'http://127.0.0.1:9100';
+const DEFAULT_SHIM_PORT  = 9100;
+let shimPort = DEFAULT_SHIM_PORT;
 let pdfShimBaseUrl = PRIMARY_HELPER_URL;
 let defaultZplSnapshot = '';// most recent default written into the textarea
 
@@ -286,10 +293,11 @@ async function refreshHelperInfo() {
         (helperIsShim ? ' (shim)' : ''));
     // If the primary helper at 9100 doesn't expose ZPL→PDF (typical on
     // Windows + macOS where Zebra's official helper handles printing
-    // but has no /zpl-to-pdf endpoint), check 9101 for our shim running
-    // alongside as the PDF-preview helper. See README §4a for setup.
-    if (!pdfPreviewSupported && !helperIsShim) {
-      await probeSecondaryShim();
+    // but has no /zpl-to-pdf endpoint) AND the user has configured the
+    // shim to run on a different port, probe that port for our shim
+    // running alongside as the PDF-preview helper. See README §4a.
+    if (!pdfPreviewSupported && !helperIsShim && shimPort !== DEFAULT_SHIM_PORT) {
+      await probeShim();
     }
     if (!pdfPreviewSupported) {
       setPdfMessage('PDF preview unavailable. This requires browser-print-shim.py with zpl2pdf installed (see README §4a / §4b). The Print ZPL button and the upload-PDF section still work.', 'warn');
@@ -301,28 +309,30 @@ async function refreshHelperInfo() {
   }
 }
 
-// Best-effort probe of a secondary shim at 9101. Used when the primary
-// helper at 9100 is Zebra's official Browser Print (no /zpl-to-pdf) and
-// the user is running our shim alongside on a different port for the
-// PDF-preview feature only. Sets pdfShimBaseUrl + pdfPreviewSupported on
-// hit. Connection failure is silently absorbed — the page just leaves
-// PDF preview disabled.
-async function probeSecondaryShim() {
+// Best-effort probe of the shim at the configured shimPort. Only called
+// when the primary helper at 9100 is Zebra's official Browser Print (no
+// /zpl-to-pdf) and the user has configured shimPort to a non-default
+// value, indicating they're running the shim alongside Browser Print on
+// a different port. Sets pdfShimBaseUrl + pdfPreviewSupported on hit.
+// Connection failure is silently absorbed — the page just leaves PDF
+// preview disabled.
+async function probeShim() {
+  const url = `http://127.0.0.1:${shimPort}`;
   try {
-    const r = await fetch(`${SECONDARY_SHIM_URL}/config`, { cache: 'no-store' });
+    const r = await fetch(`${url}/config`, { cache: 'no-store' });
     if (!r.ok) return;
     const cfg = await r.json();
     const conv = cfg.supportedConversions || {};
     const isShim = typeof cfg.version === 'string' && /shim/i.test(cfg.version);
     const supportsZplToPdf = Array.isArray(conv.zpl) && conv.zpl.includes('pdf');
     if (isShim && supportsZplToPdf) {
-      pdfShimBaseUrl = SECONDARY_SHIM_URL;
+      pdfShimBaseUrl = url;
       pdfPreviewSupported = true;
-      log(`PDF preview: shim found at ${SECONDARY_SHIM_URL} (alongside primary helper at ${PRIMARY_HELPER_URL})`);
+      log(`PDF preview: shim found at ${url} (alongside primary helper at ${PRIMARY_HELPER_URL})`);
     }
   } catch (_e) {
-    // Connection refused / no server on 9101 — expected when no shim is
-    // running. Silently leave pdfPreviewSupported as it was.
+    // Connection refused / no server at shimPort — expected when no shim
+    // is running. Silently leave pdfPreviewSupported as it was.
   }
 }
 
@@ -1257,50 +1267,60 @@ function convertAndSendFileViaSdk(blob) {
 }
 
 // =============================================================================
-// PDF feature key — Zebra's licensed PDF→ZPL conversion in the official
-// helper checks this against the printer's serial number. The two PDF→ZPL
-// print pathways (Generated-PDF "Print this PDF" and the upload-PDF
-// shortcut) both read the same module-level `featureKey`.
-//
-// We do NOT bundle a key. To populate one, drop a one-line file at
-// app/feature-key.txt (gitignored). Loaded at startup from the same origin
-// that serves the page.
-//
-// For prototyping, Zebra hardcodes a public demo key in plaintext on its
-// own test harness — see README §4a for the location and how to extract
-// it. We deliberately don't ship a copy of the key in this repo, even
-// though it's public, to avoid any appearance of distributing licensed
-// material.
-//
-// The shim ignores the key entirely (it doesn't enforce the license
-// check), so on Linux + shim no setup is required regardless. The key
-// only matters when the page is talking to Zebra's official helper on
-// Windows or macOS.
-//
-// Production-deployment alternative: PDF Direct skips helper-side
-// conversion entirely — no `featureKey` needed if the printer firmware
-// has it enabled. See README §4 / internals §5.
+// Runtime config — app/config.json
 // =============================================================================
+// One optional JSON file consumed by both the page (here, via fetch) and
+// the shim (utils/browser-print-shim.py, via filesystem). All keys are
+// optional. Missing file → all defaults.
+//
+// Schema:
+//   {
+//     "shimPort":       9101,                  // where the shim binds. Default 9100.
+//     "featureKey":     "AbsQM…",              // Zebra PDF feature key. See below.
+//     "networkPrinters": [                     // Read by shim only.
+//       { "name": "Lab GX430t", "host": "192.168.1.42", "port": 9100 }
+//     ]
+//   }
+//
+// `featureKey` is required for PDF→ZPL prints when the active helper is
+// Zebra's official Browser Print (Windows/macOS) — both the Generated-PDF
+// "Print this PDF" path (via convertAndSendFileViaSdk) and the upload-PDF
+// shortcut (via getConvertedResource) feed the same value through. We do
+// NOT bundle a key. For prototyping, Zebra publishes a public demo key
+// at https://developer.zebra.com/content/browser-print-pdf — see README
+// §4a. The shim ignores the key (no license check), so Linux + shim
+// works without it.
+//
+// `shimPort` only matters when shim and Browser Print coexist (Win/Mac):
+// the user picks a port outside any Hyper-V/WSL2 reservations and writes
+// it here. The Browser Print SDK is hardcoded to 9100 in its .min.js, so
+// SDK calls always go to 9100; shimPort governs only /zpl-to-pdf.
 let featureKey = '';
 
-async function loadFeatureKey() {
+async function loadConfig() {
+  let cfg;
   try {
-    const r = await fetch('feature-key.txt', { cache: 'no-store' });
-    if (r.ok) {
-      const txt = (await r.text()).trim();
-      if (txt) {
-        featureKey = txt;
-        log('PDF feature key: loaded from app/feature-key.txt');
-        return;
-      }
+    const r = await fetch('config.json', { cache: 'no-store' });
+    if (!r.ok) {
+      log('Config: app/config.json not present — using defaults.');
+      return;
     }
-  } catch (_e) {
-    // Network-style failure (offline, fetch blocked) — fall through.
+    cfg = await r.json();
+  } catch (e) {
+    log(`Config: could not read app/config.json (${e.message || e}); using defaults.`, 'warn');
+    return;
   }
-  log('PDF feature key: not configured. Direct ZPL prints work without it. ' +
-      'For PDF→ZPL through Zebra\'s official helper (Windows/macOS), drop ' +
-      'a key in app/feature-key.txt — see README §4a for where to obtain ' +
-      'one. The bundled shim does not require a key.');
+  if (Number.isInteger(cfg.shimPort) && cfg.shimPort > 0 && cfg.shimPort < 65536) {
+    shimPort = cfg.shimPort;
+    pdfShimBaseUrl = `http://127.0.0.1:${shimPort}`;
+    log(`Config: shimPort = ${shimPort}`);
+  } else if (cfg.shimPort !== undefined) {
+    log(`Config: shimPort=${JSON.stringify(cfg.shimPort)} is invalid; using default ${DEFAULT_SHIM_PORT}.`, 'warn');
+  }
+  if (typeof cfg.featureKey === 'string' && cfg.featureKey.trim()) {
+    featureKey = cfg.featureKey.trim();
+    log('Config: PDF feature key loaded.');
+  }
 }
 
 // =============================================================================
@@ -1310,7 +1330,7 @@ async function loadFeatureKey() {
   // Show initial unavailable message — will be replaced by refreshHelperInfo
   // if pdfPreviewSupported is confirmed, or left in place if not.
   setPdfMessage('PDF preview will appear here once a printer is selected.', 'info');
-  await loadFeatureKey();
+  await loadConfig();
   await discover();
 })();
 </script>

@@ -43,19 +43,21 @@ Network printers can be added two ways:
        python3 utils/browser-print-shim.py --network 'Lab GX430t=192.168.1.42:9100'
      Format is [name=]host[:port]. Default port is 9100 (raw / JetDirect).
 
-  2. In a printers.json next to this script (utils/printers.json):
+  2. In app/config.json under `networkPrinters`:
        {
-         "network": [
+         "networkPrinters": [
            {"name": "Lab GX430t", "host": "192.168.1.42", "port": 9100}
          ]
        }
+     The same file is also read by the page for `shimPort` and `featureKey`.
+     See README §4a for the full schema.
 
 Usage:
     python3 utils/browser-print-shim.py
     python3 utils/browser-print-shim.py --network 192.168.1.42
     python3 utils/browser-print-shim.py --no-usb --network 192.168.1.42  # network only
     python3 utils/browser-print-shim.py --https
-    python3 utils/browser-print-shim.py --config /path/to/printers.json
+    python3 utils/browser-print-shim.py --config /path/to/config.json
 
 This is a shim, not Browser Print. It exists so the prototype's two
 pathways — (1) Direct ZPL and (2) Helper-converted PDF — can be exercised on
@@ -397,22 +399,42 @@ def discover_usb_printers():
     return devices
 
 
-def load_network_printers(config_path):
+def _default_config_path():
+    """Return the canonical path to app/config.json relative to this script.
+    Used as the default for --config; the user can override with another
+    path. Both the page and the shim read the same file (the page via
+    fetch from the served origin, the shim via filesystem)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    return os.path.normpath(os.path.join(here, '..', 'app', 'config.json'))
+
+
+def load_config(config_path):
+    """Read the JSON config file, returning a dict (empty if absent or
+    unparseable). Schema documented in app/browser-print.html's loadConfig
+    block — we only consume `shimPort` and `networkPrinters` here, but
+    the file is shared with the page (which also uses `featureKey`)."""
     if not os.path.exists(config_path):
-        return []
+        return {}
     try:
-        cfg = json.load(open(config_path))
-    except Exception as e:
+        with open(config_path) as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
         log.warning('Could not parse %s: %s', config_path, e)
-        return []
+        return {}
+
+
+def load_network_printers(cfg):
+    """Extract NetworkDevice objects from a parsed config dict's
+    `networkPrinters` array. Each entry: {name, host, port? (default 9100)}.
+    """
     out = []
-    for entry in cfg.get('network', []) or []:
+    for entry in cfg.get('networkPrinters', []) or []:
         try:
             d = NetworkDevice(entry['name'], entry['host'], int(entry.get('port', 9100)))
             out.append(d)
             log.info('Configured network printer: %s @ %s:%s', d.name, d.host, d.port)
         except Exception as e:
-            log.warning('Bad network printer entry %s: %s', entry, e)
+            log.warning('Bad networkPrinters entry %s: %s', entry, e)
     return out
 
 
@@ -1212,16 +1234,18 @@ def serve(port, ssl_ctx=None):
         # is a configuration mismatch, not a bug.
         scheme = 'HTTPS' if ssl_ctx is not None else 'HTTP'
         log.error('%s could not bind to 127.0.0.1:%d: %s', scheme, port, e)
-        if port == DEFAULT_HTTP_PORT:
-            log.error("Port %d is already in use. If you're on Windows or macOS "
-                      "with Zebra's official Browser Print helper running, that's "
-                      "what's holding the port. Either stop the helper, or run this "
-                      "shim on a different port for the PDF preview only:",
-                      port)
-            log.error('    python3 %s --http-port 9101 --no-mdns',
-                      os.path.basename(__file__))
-            log.error("The page auto-discovers a shim on 9101 when the primary helper "
-                      "at 9100 doesn't expose /zpl-to-pdf. See README §4a.")
+        log.error("Two common causes on Windows:")
+        log.error("  1. Zebra's Browser Print helper holds 9100 — keep it for printing, "
+                  "run this shim on a different port for the PDF preview alongside.")
+        log.error("  2. The port falls inside a Hyper-V / WSL2 reserved range. Check with:")
+        log.error("       netsh interface ipv4 show excludedportrange protocol=tcp")
+        log.error("Pick a port that's free and outside any reserved range, then either")
+        log.error("set it in app/config.json:")
+        log.error('    {"shimPort": 19101}')
+        log.error("(both the page and this shim read that file) or pass it inline:")
+        log.error('    python3 %s --http-port 19101 --no-mdns',
+                  os.path.basename(__file__))
+        log.error("See README §4a for the full config schema.")
         raise
     if ssl_ctx is not None:
         httpd.socket = ssl_ctx.wrap_socket(httpd.socket, server_side=True)
@@ -1233,8 +1257,21 @@ def serve(port, ssl_ctx=None):
 
 def parse_args():
     here = os.path.dirname(os.path.abspath(__file__))
-    p = argparse.ArgumentParser(description='Browser Print API shim for Linux (development only).')
-    p.add_argument('--http-port',  type=int, default=DEFAULT_HTTP_PORT)
+    # Pre-parse the config file so its values can serve as argparse defaults
+    # (--http-port specifically). We re-parse it later for non-default
+    # network-printer extraction; load_config caches nothing, but the file
+    # is small and read at startup, so two reads is fine.
+    pre_config_path = _default_config_path()
+    pre_config = load_config(pre_config_path)
+    default_port = DEFAULT_HTTP_PORT
+    if isinstance(pre_config.get('shimPort'), int) and 1 <= pre_config['shimPort'] <= 65535:
+        default_port = pre_config['shimPort']
+
+    p = argparse.ArgumentParser(description='Browser Print API shim. '
+                                'Stand-in helper on Linux; PDF-preview helper alongside Browser Print on Win/Mac.')
+    p.add_argument('--http-port',  type=int, default=default_port,
+                   help='HTTP listen port. Default %(default)d (from app/config.json '
+                        'shimPort if set, else 9100).')
     p.add_argument('--https-port', type=int, default=DEFAULT_HTTPS_PORT)
     p.add_argument('--https', action='store_true',
                    help='Also bind HTTPS on --https-port (auto-generates a self-signed cert if needed).')
@@ -1254,8 +1291,8 @@ def parse_args():
     p.add_argument('--network', action='append', default=[], metavar='[NAME=]HOST[:PORT]',
                    help='Register a network printer (repeatable). Default port 9100. '
                         'Examples: --network 192.168.1.42  or  --network "Lab GX430t=10.0.0.5:9100"')
-    p.add_argument('--config', default=os.path.join(here, 'printers.json'),
-                   help='Path to a JSON file listing additional network printers.')
+    p.add_argument('--config', default=pre_config_path,
+                   help='Path to runtime config JSON. Default app/config.json relative to this script.')
     p.add_argument('--rescan-seconds', type=int, default=30,
                    help='How often to rediscover USB devices.')
     p.add_argument('--convert-dpi', type=int, default=DEFAULT_CONVERT_DPI,
@@ -1308,8 +1345,8 @@ def refresh_devices(args):
         except Exception as e:
             log.warning('Bad --network %r: %s', spec, e)
 
-    # Network printers from printers.json (if present)
-    devices += load_network_printers(args.config)
+    # Network printers from app/config.json (if present)
+    devices += load_network_printers(load_config(args.config))
 
     # Network printers via mDNS auto-discovery (unless disabled).
     # Dedupe against explicit registrations on (host, port) — those win.
@@ -1326,7 +1363,7 @@ def refresh_devices(args):
         log.warning('No printers registered. Either:')
         log.warning('  - Plug in a USB Zebra (and ensure your user has access to /dev/usb/lp*)')
         log.warning('  - Pass --network HOST[:PORT] for a network printer')
-        log.warning('  - Add network printers to %s', args.config)
+        log.warning('  - Add network printers to %s under "networkPrinters"', args.config)
         if args.no_mdns:
             log.warning('  - Re-enable mDNS auto-discovery by dropping --no-mdns')
         elif not _have_avahi_browse():

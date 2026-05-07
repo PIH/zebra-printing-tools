@@ -24,6 +24,7 @@ printers.json
 /utils/bin/*/
 !/utils/bin/.gitkeep
 
-# Optional per-deployment override for the PDF feature key (see app/browser-print.html
-# DEFAULT_FEATURE_KEY block). Falls back to the bundled public demo key if absent.
-/app/feature-key.txt
+# Optional per-deployment runtime config — schema documented in README §4a
+# and the loadConfig() block at the top of app/browser-print.html.
+# Read by both the page (via fetch) and the shim (via filesystem).
+/app/config.json
