@@ -413,13 +413,22 @@ $('discover').addEventListener('click', discover);
 // USB/socket buffer captures only the first frame before the printer has
 // flushed the rest. Retry transparently on offline / timeout / error so a
 // transient race doesn't surface as a red pill the user has to click past.
-// Timing budget. A successful round-trip with the shim's read-until-quiet
-// drain is typically ~200–400 ms (write + printer response + 150 ms quiet
-// window). 500 ms per attempt × 4 attempts × 100 ms gap ≈ 2.3 s worst case
-// — short enough to fire automatically on initial device selection without
-// the page feeling stuck, long enough to ride out an intermittent.
-const STATUS_TIMEOUT_MS = 500;
-const STATUS_RETRIES    = 3;          // total attempts = 1 + STATUS_RETRIES
+//
+// Timing budget. The two helpers we target have very different read
+// latencies:
+//   - The shim does a read-until-quiet drain (150 ms quiet window, 1.5 s
+//     hard cap). A successful ~HS through the shim is typically 200–400 ms.
+//   - Zebra's official helper on Windows is consistently slower per read —
+//     observed ~1000–1500 ms even for small queries like ~hi against a
+//     USB-attached GX430t. Likely some combination of the spooler RPC and
+//     internal framing logic.
+// 2500 ms per attempt covers both comfortably. Two attempts (1 retry) keeps
+// the worst-case wait at ~5 s before surfacing an error pill, which is
+// long enough that the auto-fired query on device-select doesn't bail out
+// prematurely on Windows but short enough that a genuinely-offline printer
+// reports quickly.
+const STATUS_TIMEOUT_MS = 2500;
+const STATUS_RETRIES    = 1;          // total attempts = 1 + STATUS_RETRIES
 const STATUS_RETRY_GAP  = 100;
 
 const wait = (ms) => new Promise(r => setTimeout(r, ms));
