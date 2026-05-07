@@ -489,3 +489,25 @@ preflight), `POST /write`, `POST /read`, and `POST /convert` for both
 `action=return` (used by `getConvertedResource`) and `action=print` (used
 by `convertAndSendFile`). HTTP shapes round-trip with the SDK's
 expectations.
+
+### mDNS printer discovery
+
+At startup and on each periodic rescan (see `--rescan-seconds`), the shim
+calls `discover_mdns_network_printers()` unless `--no-mdns` is passed. The
+function shells out to `avahi-browse -ptr _pdl-datastream._tcp` with a 5 s
+timeout. Lines starting with `=` carry resolved records in
+semicolon-delimited form:
+`=;<iface>;<proto>;<service-name>;<type>;<domain>;<host>;<addr>;<port>;<txt>`.
+IPv6 entries (fields[2] != `'IPv4'`) are skipped to avoid duplicate
+registrations for the same printer. Discovered devices are deduped against
+any already-registered `(host, port)` pairs from `--network` CLI args or
+`printers.json`; explicit registrations win on collision so users can
+override an auto-discovered display name. Any failure (missing
+`avahi-browse`, timeout, parse error) is swallowed — the function returns
+an empty list rather than raising.
+
+The page's **Refresh printer list** button POSTs to `POST /rediscover`,
+which calls `refresh_devices` synchronously. This lets users pick up new
+network printers without restarting the shim. Zebra's official helper
+returns 404 on `/rediscover`; the page silently ignores that and proceeds
+with the normal `getLocalDevices` flow.

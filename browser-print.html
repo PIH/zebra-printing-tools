@@ -289,41 +289,57 @@ async function refreshHelperInfo() {
 }
 
 async function discover() {
+  setText('connStatus', 'Scanning…');
+  $('discover').disabled = true;
   try {
-    await refreshHelperInfo();
-  } catch {
-    setText('connStatus', 'Browser Print helper not reachable.', 'err');
-    return;
+    // Best-effort: trigger a re-scan on the shim. Zebra's official helper
+    // doesn't expose this endpoint and will 404; treat any failure as
+    // "not supported" and proceed.
+    try {
+      const r = await fetch('http://127.0.0.1:9100/rediscover', { method: 'POST' });
+      if (r.ok) log('rediscover: shim re-scanned USB + mDNS');
+    } catch (_) { /* swallow — shim may not be reachable yet */ }
+
+    try {
+      await refreshHelperInfo();
+    } catch {
+      setText('connStatus', 'Browser Print helper not reachable.', 'err');
+      return;
+    }
+
+    let defaultDev = null;
+    try { defaultDev = await bpGetDefaultDevice('printer'); }
+    catch (e) { log('getDefaultDevice: ' + e, 'warn'); }
+
+    let list = [];
+    try { list = await bpGetLocalDevices('printer'); }
+    catch (e) { log('getLocalDevices: ' + e, 'warn'); }
+
+    allDevices = list.slice();
+    if (defaultDev && !allDevices.some(d => d.uid === defaultDev.uid)) {
+      allDevices.unshift(defaultDev);
+    }
+
+    const sel = $('printers');
+    sel.innerHTML = '';
+    allDevices.forEach((d, i) => {
+      const o = document.createElement('option');
+      o.value = String(i);
+      o.textContent = `${d.name} [${d.connection}]${defaultDev && d.uid === defaultDev.uid ? ' ★ default' : ''}`;
+      sel.appendChild(o);
+    });
+
+    if (allDevices.length) {
+      selectDevice(allDevices[0]);
+      setText('connStatus', `Found ${allDevices.length} printer(s).`, 'ok');
+    } else {
+      selectDevice(null);
+      setText('connStatus', 'No printers reported by Browser Print.', 'warn');
+    }
   }
-
-  let defaultDev = null;
-  try { defaultDev = await bpGetDefaultDevice('printer'); }
-  catch (e) { log('getDefaultDevice: ' + e, 'warn'); }
-
-  let list = [];
-  try { list = await bpGetLocalDevices('printer'); }
   catch (e) { log('getLocalDevices: ' + e, 'warn'); }
-
-  allDevices = list.slice();
-  if (defaultDev && !allDevices.some(d => d.uid === defaultDev.uid)) {
-    allDevices.unshift(defaultDev);
-  }
-
-  const sel = $('printers');
-  sel.innerHTML = '';
-  allDevices.forEach((d, i) => {
-    const o = document.createElement('option');
-    o.value = String(i);
-    o.textContent = `${d.name} [${d.connection}]${defaultDev && d.uid === defaultDev.uid ? ' ★ default' : ''}`;
-    sel.appendChild(o);
-  });
-
-  if (allDevices.length) {
-    selectDevice(allDevices[0]);
-    setText('connStatus', `Found ${allDevices.length} printer(s).`, 'ok');
-  } else {
-    selectDevice(null);
-    setText('connStatus', 'No printers reported by Browser Print.', 'warn');
+  finally {
+    $('discover').disabled = false;
   }
 }
 

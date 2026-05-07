@@ -98,6 +98,11 @@ SHIM_VERSION = '0.1.0-shim'
 CONVERT_DPI  = DEFAULT_CONVERT_DPI
 CONVERT_MODE = DEFAULT_CONVERT_MODE
 
+# Populated by main(); read by handle_rediscover so the handler can
+# call refresh_devices without main() having to thread args through the
+# Handler constructor.
+RUNTIME_ARGS = None
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s %(levelname)-5s %(message)s',
@@ -409,6 +414,57 @@ def load_network_printers(config_path):
         except Exception as e:
             log.warning('Bad network printer entry %s: %s', entry, e)
     return out
+
+
+def _have_avahi_browse():
+    return shutil.which('avahi-browse') is not None
+
+
+def discover_mdns_network_printers(timeout=5.0):
+    """Discover Zebra raw-print services on the LAN via Avahi mDNS.
+    Looks for `_pdl-datastream._tcp` (port 9100, JetDirect / raw — what
+    Zebra advertises for ZPL printing).
+
+    Returns a list of NetworkDevice. Empty list on any failure (missing
+    avahi-browse, timeout, parse error, etc.) — never raises.
+    """
+    if not _have_avahi_browse():
+        return []
+    try:
+        proc = subprocess.run(
+            ['avahi-browse', '-ptr', '_pdl-datastream._tcp'],
+            capture_output=True, timeout=timeout, text=True,
+        )
+    except subprocess.TimeoutExpired:
+        log.warning('avahi-browse timed out after %.1fs; skipping mDNS discovery', timeout)
+        return []
+    except Exception as e:
+        log.warning('avahi-browse failed: %s', e)
+        return []
+
+    devices = []
+    seen = set()
+    for line in proc.stdout.splitlines():
+        if not line.startswith('='):
+            continue
+        fields = line.split(';')
+        if len(fields) < 9:
+            continue
+        proto = fields[2]
+        if proto != 'IPv4':  # avoid duplicate IPv6 records for the same printer
+            continue
+        name = fields[3]
+        host = fields[7]
+        try:
+            port = int(fields[8])
+        except (ValueError, IndexError):
+            continue
+        key = (host, port)
+        if key in seen:
+            continue
+        seen.add(key)
+        devices.append(NetworkDevice(name, host, port))
+    return devices
 
 
 # -----------------------------------------------------------------------------
@@ -853,6 +909,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/read':         return self.handle_read()
         if path == '/convert':      return self.handle_convert()
         if path == '/zpl-to-pdf':   return self.handle_zpl_to_pdf()
+        if path == '/rediscover':   return self.handle_rediscover()
         return self._send(404, 'Not found')
 
     # ---- handlers ----
@@ -1094,6 +1151,23 @@ class Handler(BaseHTTPRequestHandler):
             except OSError:
                 pass
 
+    def handle_rediscover(self):
+        """POST /rediscover
+        Re-run USB + mDNS scans synchronously. Returns 200 OK once the
+        registry has been refreshed. Workflow ergonomic: lets the page's
+        'Refresh printer list' button trigger a fresh scan without
+        restarting the shim.
+        """
+        if RUNTIME_ARGS is None:
+            return self._send(503, 'shim not fully initialized')
+        log.info('rediscover: re-scanning USB + mDNS network printers')
+        try:
+            refresh_devices(RUNTIME_ARGS)
+        except Exception as e:
+            log.exception('rediscover failed')
+            return self._send(500, f'rediscover failed: {e}')
+        return self._send(200, '')
+
 
 # -----------------------------------------------------------------------------
 # Server bootstrap
@@ -1131,6 +1205,9 @@ def parse_args():
     p.add_argument('--cert', default=os.path.join(here, 'shim-cert.pem'))
     p.add_argument('--key',  default=os.path.join(here, 'shim-key.pem'))
     p.add_argument('--no-usb', action='store_true', help='Skip USB discovery.')
+    p.add_argument('--no-mdns', action='store_true',
+                   help='Skip mDNS auto-discovery of network printers '
+                        '(Avahi). On by default when avahi-browse is on PATH.')
     p.add_argument('--network', action='append', default=[], metavar='[NAME=]HOST[:PORT]',
                    help='Register a network printer (repeatable). Default port 9100. '
                         'Examples: --network 192.168.1.42  or  --network "Lab GX430t=10.0.0.5:9100"')
@@ -1191,17 +1268,29 @@ def refresh_devices(args):
     # Network printers from printers.json (if present)
     devices += load_network_printers(args.config)
 
+    # Network printers via mDNS auto-discovery (unless disabled).
+    # Dedupe against explicit registrations on (host, port) — those win.
+    if not args.no_mdns:
+        explicit_keys = {(d.host, d.port) for d in devices if isinstance(d, NetworkDevice)}
+        for d in discover_mdns_network_printers():
+            if (d.host, d.port) in explicit_keys:
+                continue
+            devices.append(d)
+            log.info('Discovered network printer (mDNS): %s @ %s:%d', d.name, d.host, d.port)
+
     registry.replace(devices)
     if not devices:
         log.warning('No printers registered. Either:')
         log.warning('  - Plug in a USB Zebra (and ensure your user has access to /dev/usb/lp*)')
         log.warning('  - Pass --network HOST[:PORT] for a network printer')
         log.warning('  - Add network printers to %s', args.config)
+        log.warning('  - Or install avahi-utils so the shim can auto-discover via mDNS')
 
 
 def main():
-    global CONVERT_DPI, CONVERT_MODE
+    global CONVERT_DPI, CONVERT_MODE, RUNTIME_ARGS
     args = parse_args()
+    RUNTIME_ARGS = args
     CONVERT_DPI  = args.convert_dpi
     CONVERT_MODE = args.convert_mode
     if _have_ghostscript():
@@ -1217,6 +1306,13 @@ def main():
         log.warning('zpl2pdf not found in bin/<platform>/ — run '
                     './install-zpl2pdf.sh to enable the ZPL → PDF '
                     'preview endpoint.')
+    if args.no_mdns:
+        log.info('mDNS network printer discovery: DISABLED (--no-mdns).')
+    elif _have_avahi_browse():
+        log.info('mDNS network printer discovery: ENABLED via avahi-browse.')
+    else:
+        log.info('mDNS network printer discovery: skipped (avahi-browse not on PATH; '
+                 '`sudo apt install avahi-utils` to enable).')
     refresh_devices(args)
 
     threads = [threading.Thread(target=serve, args=(args.http_port,), daemon=True)]

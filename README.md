@@ -266,9 +266,17 @@ module already uses to push ZPL to network printers). The shim opens a
 persistent TCP socket per device so `device.write` followed by `device.read`
 can do the `~HS` query/response cycle on the same connection.
 
+##### Auto-discovery via mDNS (Avahi)
+
+If `avahi-browse` is on PATH (Linux: `sudo apt install avahi-utils` if it isn't), the shim auto-discovers Zebra printers advertising `_pdl-datastream._tcp` (port 9100, raw / JetDirect — the service Zebra printers use for ZPL printing) at startup and on each periodic rescan. Discovered printers appear in the dropdown alongside any registered via `--network` or `printers.json`. Pass `--no-mdns` to disable.
+
+The page's **Refresh printer list** button POSTs to `/rediscover` on the shim, which re-runs the USB + mDNS scan synchronously — no shim restart needed when you plug in a new network printer.
+
+(macOS doesn't ship `avahi-browse`; for now use explicit `--network` registrations on macOS. Windows users use Zebra's official helper which has its own discovery.)
+
 #### Finding a Zebra's IP
 
-If you don't already know the printer's IP:
+On Linux with Avahi installed, the shim auto-discovers Zebra printers advertising `_pdl-datastream._tcp` (see "Auto-discovery via mDNS" above) — you usually don't need to look up the IP manually. The hints below are for cases where mDNS isn't available (macOS without dns-sd plumbing, network segments where mDNS is filtered, or if you've passed `--no-mdns`).
 
 - **Print a config label.** Most Zebras have a button combo (often: hold
   Feed for ~5 s) that emits a label with the IP printed on it.
@@ -280,10 +288,6 @@ If you don't already know the printer's IP:
   ```
 - **The printer's web UI** if it's already on the network — point a
   browser at the assigned IP.
-
-The shim does *not* currently auto-discover network printers. If you want
-mDNS auto-discovery wired in, that's a small addition (shells out to
-`avahi-browse`, ~30 lines). Tell me if it's worth it.
 
 For the technical detail of how the shim's PDF→ZPL conversion works internally, see [internals.md §8 Shim internals](docs/internals.md#8-shim-internals).
 
