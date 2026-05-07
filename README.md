@@ -1,8 +1,9 @@
 # Client-side Zebra label printing
 
-A self-contained Chrome page (`browser-print.html`) that prints labels
-directly from the browser to any Zebra ZPL printer the Browser Print
-helper can see, with no print dialog and no per-print user interaction.
+A self-contained Chrome page (`app/browser-print.html`) that prints
+labels directly from the browser to any Zebra ZPL printer the Browser
+Print helper can see, with no print dialog and no per-print user
+interaction.
 Resolution and label dimensions are auto-detected from whichever printer
 the user picks — the page was developed against a GX430t but works
 unchanged on any GX/ZD/ZT/etc.
@@ -60,7 +61,7 @@ the textarea for other media.
 
 ## 2. Where the shim is needed
 
-The shim (`browser-print-shim.py`) is purely a Browser Print API substitute. Whether you need it depends on platform and which features you want:
+The shim (`utils/browser-print-shim.py`) is purely a Browser Print API substitute. Whether you need it depends on platform and which features you want:
 
 | Platform | For printing | For the *Generate PDF* preview |
 |---|---|---|
@@ -79,10 +80,10 @@ If you only want to print labels on Windows or macOS, install Zebra's official h
 ```bash
 sudo apt install ghostscript                    # for PDF→ZPL conversion (existing pipeline)
 sudo usermod -aG lp $USER && newgrp lp          # USB printer access (re-login if newgrp not available)
-./install-zpl2pdf.sh                            # bundled ZPL→PDF binary (~60 MB)
-./restart-shim.sh                               # starts the shim in foreground; Ctrl-C to stop
+./utils/install-zpl2pdf.sh                      # bundled ZPL→PDF binary (~60 MB)
+./utils/restart-shim.sh                         # starts the shim in foreground; Ctrl-C to stop
 # in another terminal:
-python3 -m http.server 8000
+python3 -m http.server 8000 -d app
 # open http://localhost:8000/browser-print.html in Chrome
 ```
 
@@ -92,10 +93,10 @@ python3 -m http.server 8000
 # 1. Install Zebra's Browser Print helper (one-time, GUI installer):
 #    https://www.zebra.com/us/en/support-downloads/software/printer-software/browser-print.html
 # 2. (optional, only for Generate-PDF preview) install the shim and zpl2pdf:
-.\install-zpl2pdf.ps1
-python browser-print-shim.py
+.\utils\install-zpl2pdf.ps1
+python utils\browser-print-shim.py
 # 3. Serve the page in another terminal:
-python -m http.server 8000
+python -m http.server 8000 -d app
 # open http://localhost:8000/browser-print.html in Chrome
 ```
 
@@ -106,10 +107,10 @@ python -m http.server 8000
 #    https://www.zebra.com/us/en/support-downloads/software/printer-software/browser-print.html
 # 2. (optional, only for Generate-PDF preview) install the shim and zpl2pdf:
 brew install ghostscript                        # if not already installed
-./install-zpl2pdf.sh
-./restart-shim.sh
+./utils/install-zpl2pdf.sh
+./utils/restart-shim.sh
 # 3. Serve the page in another terminal:
-python3 -m http.server 8000
+python3 -m http.server 8000 -d app
 # open http://localhost:8000/browser-print.html in Chrome
 ```
 
@@ -124,19 +125,18 @@ Browser Print API. Two routes:
 
 - **Production-style** — install Zebra's official Browser Print helper.
   Available for Windows and macOS. See §4a.
-- **Linux dev / test** — run the small Python shim included in this folder
-  (`browser-print-shim.py`). Speaks the same API; the SDK doesn't know it's
-  talking to a substitute. See §4b.
+- **Linux dev / test** — run the small Python shim included in this repo
+  (`utils/browser-print-shim.py`). Speaks the same API; the SDK doesn't
+  know it's talking to a substitute. See §4b.
 
 Once one of those is running, the rest is the same:
 
 1. **Make sure the printer is reachable.** USB Zebra connected and powered
    on, or its IP listed in the helper's config.
-2. **Serve this folder.** `127.0.0.1` is treated as a secure context in
-   Chrome, so the SDK can reach the helper from `file://` too:
+2. **Serve the `app/` folder.** `127.0.0.1` is treated as a secure context
+   in Chrome, so the SDK can reach the helper from `file://` too:
    ```
-   cd testing
-   python3 -m http.server 8000
+   python3 -m http.server 8000 -d app
    # → http://localhost:8000/browser-print.html
    ```
 3. Open the page, pick your printer in the dropdown — the printer info
@@ -170,12 +170,12 @@ discovers what the OS already sees.
 
 **PDF preview support.** The *Generate PDF* button in the page requires a `POST /zpl-to-pdf` endpoint that Zebra's official helper does NOT expose. If you want the live PDF preview on Windows or macOS, you have two options:
 
-1. **Run the shim alongside the official helper.** The shim listens on the same port (9100) by default — pick one to keep enabled at a time, or run the shim on a different port and adjust the page's fetch URL. The shim's `POST /zpl-to-pdf` endpoint shells out to a bundled `zpl2pdf` binary; install it via `.\install-zpl2pdf.ps1` on Windows or `./install-zpl2pdf.sh` on macOS. See §4b for shim setup details.
+1. **Run the shim alongside the official helper.** The shim listens on the same port (9100) by default — pick one to keep enabled at a time, or run the shim on a different port and adjust the page's fetch URL. The shim's `POST /zpl-to-pdf` endpoint shells out to a bundled `zpl2pdf` binary; install it via `.\utils\install-zpl2pdf.ps1` on Windows or `./utils/install-zpl2pdf.sh` on macOS. See §4b for shim setup details.
 2. **Skip the preview.** The *Print* button (direct ZPL) and the *Print uploaded PDF* skip-preview shortcut still work without the shim. The page detects this and shows "PDF preview unavailable" in the Generated PDF section instead of the iframe — graceful degradation, no errors.
 
 If you don't need the preview at all, the official helper is sufficient.
 
-### 4b. The shim — `browser-print-shim.py`
+### 4b. The shim — `utils/browser-print-shim.py`
 
 A minimal Python shim that mirrors the Browser Print HTTP API. The SDK in
 the browser does not know it's talking to a substitute. **Two main use cases:**
@@ -184,10 +184,10 @@ the browser does not know it's talking to a substitute. **Two main use cases:**
 2. **Windows / macOS PDF-preview helper.** The shim's `POST /zpl-to-pdf` endpoint (backed by the bundled `zpl2pdf` binary) doesn't exist in Zebra's official helper. Run the shim alongside or instead of Zebra's helper to get the live PDF preview on Win/Mac. (See §4a for trade-offs.)
 
 ```
-python3 browser-print-shim.py                                    # USB only
-python3 browser-print-shim.py --network 192.168.1.42             # one network printer
-python3 browser-print-shim.py --network 'Lab GX430t=10.0.0.5'    # named, default port
-python3 browser-print-shim.py --no-usb --network 192.168.1.42    # network only
+python3 utils/browser-print-shim.py                                    # USB only
+python3 utils/browser-print-shim.py --network 192.168.1.42             # one network printer
+python3 utils/browser-print-shim.py --network 'Lab GX430t=10.0.0.5'    # named, default port
+python3 utils/browser-print-shim.py --no-usb --network 192.168.1.42    # network only
 ```
 
 Stdlib only — no `pip install` needed. CORS-allows everything (it's a dev
@@ -202,13 +202,13 @@ printer-select) the shim shells out to a bundled `zpl2pdf` binary. To
 install it once:
 
 ```
-./install-zpl2pdf.sh                 # Linux / macOS
-.\install-zpl2pdf.ps1                # Windows
+./utils/install-zpl2pdf.sh                 # Linux / macOS
+.\utils\install-zpl2pdf.ps1                # Windows
 ```
 
 The script downloads a pinned release from
 [brunoleocam/ZPL2PDF](https://github.com/brunoleocam/ZPL2PDF/releases)
-into `bin/<platform>/`, verifies SHA256 against the release's
+into `utils/bin/<platform>/`, verifies SHA256 against the release's
 `SHA256SUMS.txt`, and is idempotent (re-runs are no-ops if already
 installed). The shim auto-detects the binary on startup and advertises
 `zpl: ["pdf"]` in its `/config.supportedConversions`. The page reads
@@ -218,13 +218,13 @@ that flag at startup and either enables the preview flow or shows
 Without `zpl2pdf` installed, *Print* and the upload-PDF skip-preview
 shortcut still work — only the live preview is unavailable.
 
-There's also a small `restart-shim.sh` helper in the repo that pkills
-any running shim and re-launches it; useful during the iterative dev
-cycle. Pass-through for `--network`, `--https`, etc.
+There's also a small `utils/restart-shim.sh` helper in the repo that
+pkills any running shim and re-launches it; useful during the iterative
+dev cycle. Pass-through for `--network`, `--https`, etc.
 
 ```
-./restart-shim.sh                          # plain run
-./restart-shim.sh --network 192.168.1.42   # with a network printer
+./utils/restart-shim.sh                          # plain run
+./utils/restart-shim.sh --network 192.168.1.42   # with a network printer
 ```
 
 #### USB printers
@@ -247,11 +247,11 @@ Two ways to register one:
 
 ```
 # Inline on the command line (repeatable). Format: [NAME=]HOST[:PORT]
-python3 browser-print-shim.py --network 192.168.1.42
-python3 browser-print-shim.py --network 'Lab GX430t=192.168.1.42:9100' \
-                              --network 'Pharmacy GX430t=192.168.1.43'
+python3 utils/browser-print-shim.py --network 192.168.1.42
+python3 utils/browser-print-shim.py --network 'Lab GX430t=192.168.1.42:9100' \
+                                    --network 'Pharmacy GX430t=192.168.1.43'
 ```
-or in a `printers.json` next to the shim:
+or in a `utils/printers.json` next to the shim:
 ```json
 {
   "network": [
@@ -305,12 +305,12 @@ For the technical detail of how the shim's PDF→ZPL conversion works internally
 - No driver swap is needed (this is the whole point of choosing Browser
   Print over WebUSB).
 - USB and network printers both work.
-- **PDF preview** is not provided by Zebra's helper. To get the *Generate PDF* button working on Windows, install the shim's `zpl2pdf` binary via `.\install-zpl2pdf.ps1` and run `python browser-print-shim.py` alongside (or instead of) Zebra's helper. See §4a for trade-offs.
+- **PDF preview** is not provided by Zebra's helper. To get the *Generate PDF* button working on Windows, install the shim's `zpl2pdf` binary via `.\utils\install-zpl2pdf.ps1` and run `python utils\browser-print-shim.py` alongside (or instead of) Zebra's helper. See §4a for trade-offs.
 
 ### macOS
 - Generally just works. The printer can stay registered in CUPS — Browser
   Print uses it normally rather than fighting for exclusive USB access.
-- **PDF preview** same caveat as Windows: Zebra's helper doesn't expose `POST /zpl-to-pdf`. Run the shim with `./install-zpl2pdf.sh` + `python3 browser-print-shim.py` if you want the preview. See §4a.
+- **PDF preview** same caveat as Windows: Zebra's helper doesn't expose `POST /zpl-to-pdf`. Run the shim with `./utils/install-zpl2pdf.sh` + `python3 utils/browser-print-shim.py` if you want the preview. See §4a.
 
 ### Ubuntu / Linux
 - No official Browser Print build on the main downloads page; we use
@@ -330,25 +330,27 @@ For the technical detail of how the shim's PDF→ZPL conversion works internally
 ## 6. Files in this directory
 
 ```
-browser-print.html                  ← the page (single ZPL textarea + always-visible PDF preview iframe + diagnostics)
-browser-print-shim.py               ← Linux dev shim (Browser Print API substitute) — supports USB and network transports;
+app/                                ← everything served to the browser
+  browser-print.html                ← the page (single ZPL textarea + always-visible PDF preview iframe + diagnostics)
+  BrowserPrint-3.1.250.min.js       ← Zebra Browser Print JS SDK v3.1.250 — generic helper-API client
+  BrowserPrint-Zebra-1.1.250.min.js ← Zebra Browser Print JS SDK v3.1.250 — Zebra device wrapper (status / config helpers)
+                                      Both .min.js files are from Zebra's "Browser Print SDK v3.1.250" download
+                                      (see §7 Further reading for the developer-site link, JSDoc reference, and
+                                      sample app); we vendor them so the page works offline.
+utils/                              ← server-side helpers (run by the user, not loaded in the browser)
+  browser-print-shim.py             ← Linux dev shim (Browser Print API substitute) — supports USB and network transports;
                                       adds POST /zpl-to-pdf for ZPL→PDF preview when the bundled zpl2pdf is installed
-install-zpl2pdf.sh                  ← POSIX (Linux/macOS) installer for the bundled zpl2pdf binary
-install-zpl2pdf.ps1                 ← Windows installer for the bundled zpl2pdf binary
-restart-shim.sh                     ← dev helper: pkill + restart the shim in one step
-bin/                                ← installed zpl2pdf binaries (.gitignored)
+  install-zpl2pdf.sh                ← POSIX (Linux/macOS) installer for the bundled zpl2pdf binary
+  install-zpl2pdf.ps1               ← Windows installer for the bundled zpl2pdf binary
+  restart-shim.sh                   ← dev helper: pkill + restart the shim in one step
+  bin/                              ← installed zpl2pdf binaries (.gitignored, populated by install-zpl2pdf.{sh,ps1})
+  printers.json                     ← optional: list of network printers for the shim
+  shim-cert.pem, shim-key.pem       ← generated by `--https`; gitignore them
 docs/internals.md                   ← implementation reference for future maintainers
 docs/decision-log.md                ← design history and rationale (alternatives surveyed, decision log)
 docs/superpowers/specs/             ← design specs (e.g. the 2026-05-06 ZPL textarea & PDF preview redesign)
 docs/superpowers/plans/             ← implementation plans (paired 1:1 with specs)
 README.md                           ← this file
-zebra-browser-print-js-v31250/      ← Zebra Browser Print JS SDK v3.1.250
-                                      (only the two .min.js files loaded by
-                                      the page; for SDK reference / JSDoc /
-                                      examples, see Zebra's developer site
-                                      under §7 Further reading)
-printers.json                       ← optional: list of network printers for the shim
-shim-cert.pem, shim-key.pem         ← generated by `--https`; gitignore them
 ```
 
 ---
@@ -372,10 +374,11 @@ shim-cert.pem, shim-key.pem         ← generated by `--https`; gitignore them
 
 ### Zebra's documentation
 
-The page loads two files from `zebra-browser-print-js-v31250/` at
-runtime; for everything else (JSDoc reference, sample code, newer SDK
-versions, Browser Print helper installers, the ZPL programming guide,
-SGD command reference, PDF Direct enablement) consult Zebra directly:
+The page loads two `.min.js` files from `app/` at runtime (the Browser
+Print JS SDK v3.1.250); for everything else (JSDoc reference, sample
+code, newer SDK versions, Browser Print helper installers, the ZPL
+programming guide, SGD command reference, PDF Direct enablement)
+consult Zebra directly:
 
 - **Browser Print helper download** (Windows / macOS) —
   <https://www.zebra.com/us/en/support-downloads/software/printer-software/browser-print.html>

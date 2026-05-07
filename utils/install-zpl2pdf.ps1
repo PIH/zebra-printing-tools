@@ -1,4 +1,4 @@
-# Install zpl2pdf into bin\win-x64\ for use by browser-print-shim.py.
+# Install zpl2pdf into utils\bin\win-x64\ for use by browser-print-shim.py.
 # Pinned to a specific release for reproducibility. Idempotent.
 
 $ErrorActionPreference = 'Stop'

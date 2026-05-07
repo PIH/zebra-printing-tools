@@ -38,12 +38,12 @@ simplest way is to be in the `lp` group:
 
 Network printers can be added two ways:
 
-  1. Inline on the command line, one or more times:
-       python3 browser-print-shim.py --network 192.168.1.42
-       python3 browser-print-shim.py --network 'Lab GX430t=192.168.1.42:9100'
+  1. Inline on the command line, one or more times (run from the repo root):
+       python3 utils/browser-print-shim.py --network 192.168.1.42
+       python3 utils/browser-print-shim.py --network 'Lab GX430t=192.168.1.42:9100'
      Format is [name=]host[:port]. Default port is 9100 (raw / JetDirect).
 
-  2. In a printers.json next to this script:
+  2. In a printers.json next to this script (utils/printers.json):
        {
          "network": [
            {"name": "Lab GX430t", "host": "192.168.1.42", "port": 9100}
@@ -51,11 +51,11 @@ Network printers can be added two ways:
        }
 
 Usage:
-    python3 browser-print-shim.py
-    python3 browser-print-shim.py --network 192.168.1.42
-    python3 browser-print-shim.py --no-usb --network 192.168.1.42  # network only
-    python3 browser-print-shim.py --https
-    python3 browser-print-shim.py --config /path/to/printers.json
+    python3 utils/browser-print-shim.py
+    python3 utils/browser-print-shim.py --network 192.168.1.42
+    python3 utils/browser-print-shim.py --no-usb --network 192.168.1.42  # network only
+    python3 utils/browser-print-shim.py --https
+    python3 utils/browser-print-shim.py --config /path/to/printers.json
 
 This is a shim, not Browser Print. It exists so the prototype's two
 pathways — (1) Direct ZPL and (2) Helper-converted PDF — can be exercised on
@@ -542,7 +542,7 @@ def _have_ghostscript():
 def _zpl2pdf_path():
     """Return the path to the bundled zpl2pdf binary for this platform, or
     None if it isn't installed. Layout matches install-zpl2pdf.sh:
-    bin/<os>-<arch>/zpl2pdf[.exe].
+    <script_dir>/bin/<os>-<arch>/zpl2pdf[.exe] (i.e. utils/bin/<os>-<arch>/...).
     """
     import platform as _pl
     here = os.path.dirname(os.path.abspath(__file__))
@@ -1334,8 +1334,8 @@ def main():
         log.info('zpl2pdf %s found — POST /zpl-to-pdf is enabled.',
                  _zpl2pdf_path())
     else:
-        log.warning('zpl2pdf not found in bin/<platform>/ — run '
-                    './install-zpl2pdf.sh to enable the ZPL → PDF '
+        log.warning('zpl2pdf not found in utils/bin/<platform>/ — run '
+                    './utils/install-zpl2pdf.sh to enable the ZPL → PDF '
                     'preview endpoint.')
     if args.no_mdns:
         log.info('mDNS network printer discovery: DISABLED (--no-mdns).')

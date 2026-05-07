@@ -21,5 +21,5 @@ printers.json
 *.key
 
 # zpl2pdf binaries (installed via install-zpl2pdf.sh; not committed)
-/bin/*/
-!/bin/.gitkeep
+/utils/bin/*/
+!/utils/bin/.gitkeep

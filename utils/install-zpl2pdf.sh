@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install zpl2pdf into bin/<platform>/ for use by browser-print-shim.py.
+# Install zpl2pdf into utils/bin/<platform>/ for use by browser-print-shim.py.
 # Pinned to a specific release for reproducibility. Idempotent.
 #
 # Tested asset layout for v3.1.1: flat tarball (no directory prefix), binary
