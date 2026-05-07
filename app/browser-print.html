@@ -74,7 +74,7 @@
   <div class="row">
     <button id="discover">Refresh printer list</button>
     <select id="printers" style="min-width: 320px"></select>
-    <span id="apiInfo" class="pill">helper: ?</span>
+    <span id="apiInfo" class="pill">helper: probing…</span>
     <span id="connStatus" class="muted">Not connected.</span>
   </div>
 </section>
@@ -290,6 +290,11 @@ let defaultZplSnapshot = '';// most recent default written into the textarea
 // Connection: BrowserPrint.getDefaultDevice + getLocalDevices
 // =============================================================================
 async function refreshHelperInfo() {
+  // Reset to the loading state on every call, not just first load —
+  // a manual "Refresh printer list" should visibly re-probe rather
+  // than leaving the previous ok/err pill in place until the GET
+  // returns.
+  setText('apiInfo', 'helper: probing…', 'pill');
   try {
     const cfg = await bpGetAppConfig();
     const apiLevel = cfg.api_level ?? '?';
@@ -300,7 +305,12 @@ async function refreshHelperInfo() {
     // pdfShimBaseUrl was already set by loadConfig() based on shim*Port +
     // location.protocol — don't reset it here (early versions did, which
     // clobbered the configured URL before probeShim() could read it).
-    setText('apiInfo', `helper: ${platform}, API L${apiLevel}`, 'pill ok');
+    //
+    // Pill text shows just the platform plus a "(shim)" marker for
+    // ours; the api_level integer (Zebra-internal capability bit) is
+    // not surfaced here — full /config reply is logged below for
+    // anyone debugging.
+    setText('apiInfo', `helper: ${platform}${helperIsShim ? ' (shim)' : ''}`, 'pill ok');
     log(`Browser Print: platform=${platform}, api_level=${apiLevel}, ` +
         `supportedConversions=${JSON.stringify(conv)}` +
         (helperIsShim ? ' (shim)' : ''));
