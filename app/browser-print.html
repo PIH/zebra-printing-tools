@@ -1196,7 +1196,7 @@ $('printCustomPdf').addEventListener('click', async () => {
   setText('customPdfStatus', `Converting ${file.name}…`);
   const t0 = performance.now();
   try {
-    const zpl = await zebra.getConvertedResource(file, {
+    const response = await zebra.getConvertedResource(file, {
       toFormat:   'zpl',
       fromFormat: 'pdf',
       // Zebra's helper expects keys keyed by source format — i.e.
@@ -1204,6 +1204,22 @@ $('printCustomPdf').addEventListener('click', async () => {
       // Wire shape verified against `cagdemo.com/BrowserPrint/test/external/zebra_test.html`.
       ...(featureKey ? { keys: { pdf: featureKey } } : {}),
     });
+    // Zebra's helper returns `{ data: "<zpl>" }` (per every getConvertedResource
+    // example in cagdemo's zebra_test.html — `var label = "^XA^FO0,0" + response.data + "^XZ"`).
+    // Be defensive: accept either the wrapped object shape or a bare string.
+    const rawZpl = (response && typeof response === 'object' && 'data' in response)
+      ? response.data
+      : response;
+    if (typeof rawZpl !== 'string' || !rawZpl.length) {
+      throw new Error(`Helper returned unexpected shape: ${JSON.stringify(response)?.slice(0, 200)}`);
+    }
+    // For images the helper returns just the `^GFA` fragment — caller wraps
+    // with `^XA^FO0,0...^XZ`. For PDFs it tends to return a complete label
+    // already (or several `^XA...^XZ` blocks for multi-page input). Detect
+    // and wrap only when needed so we don't double-wrap a multi-page job.
+    const zpl = rawZpl.trimStart().startsWith('^XA')
+      ? rawZpl
+      : `^XA^FO0,0${rawZpl}^XZ`;
     const dtConv = (performance.now() - t0).toFixed(0);
     setText('customPdfStatus',
       `Converted ${zpl.length.toLocaleString()} chars in ${dtConv} ms; sending…`);
