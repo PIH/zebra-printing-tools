@@ -1,0 +1,110 @@
+# Decision log — design history and rationale
+
+This document records WHY the tool is shaped the way it is — what alternatives we considered and why they didn't fit, and the chronological log of decisions made during development. For setup, see the [README](../README.md). For implementation reference, see [internals.md](internals.md).
+
+---
+
+## 1. Goal & constraints
+
+The design was shaped by a specific set of constraints that ruled out simpler approaches:
+
+**Hard requirements:**
+- No print dialog.
+- No per-print user interaction (one-time setup is fine).
+- Printer remains usable by other applications on the same machine.
+
+**Existing OpenMRS module behavior:** server-side ZPL generation, then
+pushed to network printers over a raw TCP socket on port 9100. The
+client-side path needs a different transport but should reuse the same
+ZPL where possible. This meant the transport layer had to be swappable
+without touching the ZPL generation logic already in the module.
+
+**Client OSes:** primarily Windows; should also work on Ubuntu and macOS.
+
+These constraints together ruled out `window.print()` (dialog), WebUSB
+(removes the printer from the OS on Windows — see §2), and any approach
+that required driver modification or exclusive device ownership.
+
+---
+
+## 2. Options surveyed and rejected
+
+### Print.js (already in this folder)
+**Rejected.** Print.js generates an iframe and calls `window.print()`. That
+still triggers Chrome's print preview, violating the "no dialog" requirement.
+The file is left in the directory only because it was already there.
+
+### `window.print()` / OS print system via Zebra driver
+**Rejected.** Same dialog problem. Even with kiosk-print flags, you're at the
+mercy of Chrome's print policy and the driver's behavior, and you give up
+fine control over ZPL.
+
+### WebUSB (talk to the printer's bulk endpoint directly from the page)
+**Considered, then rejected.** Zero-install on the *page* side, but each OS
+has a friction point that blocks the path to production:
+
+- **Windows:** the OS's `usbprint.sys` claims the device. To make it
+  WebUSB-visible you have to swap the driver to WinUSB (via Zadig). That
+  removes the printer from the OS print system, so other apps can no longer
+  use it — directly violating one of our constraints.
+- **Linux:** the kernel `usblp` module auto-claims the printer-class
+  interface; you'd need a udev rule + module blacklist or per-attach unbind.
+- **macOS:** generally works, but if CUPS has the printer added it'll fight
+  WebUSB for the device.
+- **Pairing:** Chrome requires a one-time `requestDevice()` user gesture per
+  origin/profile. That's small but not zero.
+
+WebUSB is the cleanest "browser native" demo, but it doesn't survive contact
+with the production constraint that the printer must remain usable by the OS.
+We did not pursue it.
+
+### Zebra Browser Print
+**Selected.** Small native helper app (Windows MSI / macOS PKG / Linux DEB)
+that runs in the user session and exposes a localhost HTTP service. The page
+talks to it via Zebra's official JavaScript SDK. The helper sends bytes
+through the OS's installed Zebra driver, so the printer remains a normal
+system printer.
+
+Trade-off: each client needs the helper installed once. In return: no driver
+swaps, no kernel-module fights, no pairing prompt, USB *and* network printers,
+official Zebra support, and parsed printer status.
+
+### PDF Direct on the printer
+**Not available on the GX430t.** PDF Direct is a Link-OS firmware option on
+ZT400/ZT600 series and some ZD620 models — those printers can take a `.pdf`
+straight on the wire. The GX430t's firmware has no PDF interpreter, so any
+"send a PDF" workflow has to convert to ZPL on the client before transport.
+
+---
+
+## 3. Chronological decision log
+
+Each entry captures a discrete moment where the design or implementation
+shifted — things tried, things broken, things learned.
+
+| Step | What happened |
+|---|---|
+| 1 | Started from the existing module's network-socket ZPL printing, looking for client-side equivalents in the browser. |
+| 2 | Surveyed: Print.js (rejected — dialog), `window.print()` (rejected — dialog), WebUSB (rejected — Windows driver swap removes the printer from the OS), Zebra Browser Print (selected). |
+| 3 | First prototype hit Browser Print's HTTP API directly via `fetch()`. Worked, but didn't handle the HTTP↔HTTPS port switch and didn't surface parsed printer status. |
+| 4 | Discovered the SDK and the helper application are *separate* downloads — adding the SDK alone isn't sufficient. |
+| 5 | Discovered (by reading `BrowserPrint-3.1.250.min.js`) that the helper actually listens on **two** ports: 9100 (HTTP) and 9101 (HTTPS, self-signed). The SDK picks based on the page's protocol. |
+| 6 | Discovered (in the SDK's bundled JSDoc) that PDF conversion via the helper is gated on a Zebra `featureKey` license. Image conversions are not. |
+| 7 | Refactored to use the SDK throughout (`BrowserPrint.getDefaultDevice`, `device.send`, `Zebra.Printer.getStatus`), added a third pathway via `Zebra.Printer.getConvertedResource`, wired post-print status reads. |
+| 8 | Discovered Zebra no longer distributes a Linux Browser Print build on the main downloads page (only Windows / macOS / Android). |
+| 9 | Built `browser-print-shim.py` — a stdlib-only Python service that mirrors the Browser Print HTTP API contract (extracted from `BrowserPrint-3.1.250.min.js`). Supports both transports the GX430t actually uses: USB (via the kernel `usblp` device node, which is bidirectional, so status reads work) and network (raw TCP on port 9100, persistent socket so `~HS` query/response works). Validated end-to-end with `curl`. |
+| 10 | Added the user's Zebra PDF feature key as a default in the prototype HTML so pathway 3 doesn't need re-pasting on each load. (Security note: don't commit the file with the key intact to a public repo.) |
+| 11 | Tried pathway 3 against the shim, hit the 501 from `/convert` — implemented `/convert` in the shim using Ghostscript + Floyd-Steinberg + ZPL `^GF` run-length compression. The shim now advertises `api_level: 4` and `supportedConversions: {"pdf": ["zpl"]}` when `gs` is on the PATH, so all three pathways can be exercised on Linux dev boxes. Output isn't bit-identical to Zebra's licensed converter but is a credible substitute. |
+| 12 | Realised the original "pathway 2" (PDF rasterized in the browser via pdf.js + naive luminance threshold + raw `^GFA`) had become strictly worse than the shim's helper conversion on every axis — quality, payload size, dependencies — and that its only unique property ("works without any helper for the *render* step") was moot because a helper is required for the print transport regardless. Removed pathway 2 entirely; pdf.js dependency dropped; old "pathway 3" promoted to "pathway 2". Page is ~130 lines smaller. |
+| 13 | Aligned the direct-ZPL layout (margins, font sizes, barcode size and position) with what the PDF pathway produces, so labels from both pathways come out the same physical size for direct apples-to-apples comparison. Fixed a `^GF` byte-alignment bug in the shim's compression (`rstrip('0')` could strip a single nibble from the last byte when width % 8 ≠ 0). Added stale-USB-buffer drain on device open in the shim (was the likely cause of "Invalid Response" after a shim restart). |
+| 14 | This README. |
+| 15 | Confirmed the `DEFAULT_FEATURE_KEY` in `browser-print.html` is the *public* PDF demo key Zebra hands out for prototyping (hardcoded plaintext on Zebra's own test harness at `cagdemo.com/BrowserPrint/test/external/zebra_test.html`, with Zebra's developer forum thread 25874 directing users there to copy it). Kept the key in the repo with a citation comment instead of stripping it. Documented PDF Direct (`device.sendFile(pdfBlob)`) as an alternative pathway that needs no `featureKey` if the printer firmware supports it — best production answer if the deployed GX430t fleet has it enabled. |
+| 16 | Promoted this prototype out of `openmrs-module-printer/testing/` into a standalone repo at `pih/zebra-printing-tools` — it had grown beyond a "testing" scratchpad (shim, README, SDK, multiple pathways) and the dependency direction is the other way around (the OpenMRS module would consume tools from here, not the other way). |
+| 17 | Tracked spurious red "Offline" pills + indefinite "querying…" on the status row to the SDK's STX/ETX framing check on `~HS` responses (`offline = true` whenever the trimmed body doesn't *both* start with `0x02` and end with `0x03`). The actual `~HS` reply is three STX/ETX-framed records flushed back-to-back; the shim's old `/read` returned after the first `select()` fired, often capturing only the first frame. Fixed at the shim layer with `_drain_until_quiet_fd` / `_drain_until_quiet_sock` (drain until 150 ms of silence, 1500 ms hard cap). Belt-and-braces on the page: race each `getStatus` against a 500 ms timeout, retry up to 3× silently on offline / timeout / error, surface the truthful end state. ~2.3 s worst case for both auto-fire and manual click. |
+| 18 | Generalised the prototype off the GX430t. Resolution dropdown → numeric input + datalist; new width / height inputs in inches. On device selection the page now fires `head.resolution.in_dpi` SGD + `^XA^HH^XZ` + `~hi` in parallel through the SDK queue, then resolves dpi by escalating fallbacks (canonical SGD → `cfg.settings.RESOLUTION` → model-string regex → `device.host_resolution` SGD). The GX430t we tested doesn't expose the canonical SGD or a RESOLUTION field; detection succeeds on the model-string fallback (`"GX430t-300dpi"` → 300). User edits are sticky — re-detection won't overwrite them; reselect the printer to wipe overrides and detect afresh. Detection has its own 5 s per-query timeout (separate from the status budget) because `getSGD` uses `sendThenReadAllAvailable`, which recurses until `/read` returns empty — costing ~2.25 s per SGD call even on a fast printer. |
+| 19 | Promoted the page from "demo with hidden detection" to "general Zebra setup / troubleshooting tool". Added a Printer info section (model / firmware / Link-OS / dpi / connection / UID) populated from the same detection cycle that fills the geometry inputs; merged the previously-separate Status section into it (status row spans the full info-grid width with a thin underline) and replaced the two refresh buttons with a single ↻ Refresh that re-runs status + detection together. New Diagnostics section with eight preset commands (`~hi`, `~HS`, `^HH`, `^HZa`, `getvar "*"`, `^WC`, `~JC`, `~JR`) plus a free-form custom-command textarea; presets are tagged `read` or `write` so query commands wait for a response and fire-and-forget commands skip the read. Raw-response viewer shows control bytes as `<STX>`/`<ETX>`/etc. with a 16-byte/row hex dump beneath. Diagnostics deliberately bypass the SDK's queued Request machinery (uses `device.send` / `device.read` directly) for predictable single-shot behaviour and to avoid contending with the SDK's auto-fired `configTimeout` cycle. Light visual rework: subtle 1 px rules between adjacent non-pathway sections, generous vertical margin, info card uses a grid with monospace values. |
+| 20 | Caught that the existing dpi parser dropped `"1280 12/MM FULL"` because it grabbed the leading integer (head width in dots, not dpi) and the "1280" failed the range gate. Replaced `parseDpiCandidate` with `parseDensity` returning both `{ dpi, dpm }` — when an `N/mm` token is present the page now also captures the *exact* dots-per-mm density. Added a unit toggle (in / mm) for the Label-geometry section: changing units flips the resolution-field label between `dpi` and `dots/mm`, swaps its datalist (`152/203/300/600` ↔ `6/8/12/24`), updates the suffix on the width/height inputs, and reflows the Printer-info card's Resolution row to match (with the other representation in parens when known). Page defaults to whatever the printer reports — auto-switches to mm on detection when `densityDpm` is captured, *not* persisted (no localStorage). User toggling sets a session-only `userOverrodeUnit` flag so re-selection of the same printer doesn't bounce them back. The toggle converts width/height via *dots*, not via the naïve `× 25.4` factor — so the toggle preserves physical print output exactly even when the labelled dpi (300) and underlying density (12/mm = 304.8 dpi) round differently. Density itself converts via the standard `6 ↔ 152`, `8 ↔ 203`, `12 ↔ 300`, `24 ↔ 600` mapping; non-standard densities go through `× 25.4` (lossy by ≤1.6% in the unusual case). |
+| 21 | Tried twice to bring the form-based PDF (pathway 2) and direct ZPL (pathway 1) outputs into closer visual alignment by tuning ZPL font heights / barcode module width — both attempts ended up worse, because (a) ZPL ^A0's visible-cap-to-cell ratio is ~75 % not the 85 % I'd assumed, so reducing 58 → 48 over-shrunk; (b) ZPL Code 128 auto-optimises mixed-letter+digit data to subset C (90 modules instead of 112), so my dynamic `^BY` calculation under-filled even after correction; (c) the GX430t firmware treats `>9` subset directives as literal data rather than encoding directives, so forcing subset B is firmware-dependent. Lesson: the two pathways have inherently different rendering pipelines (printer firmware native vs vector-rasterised) and there's no portable native-ZPL-only way to match them exactly. Reverted to the original ZPL output and *flipped the calibration direction* per user direction: changed `buildPdf` to match the ZPL output instead. New PDF rendering uses 1:1 canvas-px-to-printer-dot scale (`width: 6` in JsBarcode, drawn at `bc.width × 72/300` pt), matching ZPL's `^BY 6` directly; PDF font sizes bumped to 17 pt header / 13 pt body so Helvetica's visible cap heights match Zebra Font 0's. Font *face* difference (Helvetica vs Font 0) is the remaining gap; only fix would be a TrueType upload via `^DU`, deliberately out of scope. |
+| 22 | Reframed the page as a label-printing utility (no longer a "prototype"). Two new top-level pathways added: **Print custom ZPL** (paste arbitrary ZPL into a textarea, send via `device.send`; for ZPL pre-generated elsewhere — e.g. the OpenMRS printer module's server-side output) and **Print uploaded PDF** (file picker → `Zebra.Printer.getConvertedResource` → `device.send`; same conversion pipeline as pathway 2, reuses the PDF feature key). README §4 now documents all four pathways side-by-side. |
+| 23 | Simplified the page around a single ZPL textarea and a server-rendered PDF preview. Pathways 1 + 3 collapse into one freely-edited textarea (default pre-filled assumes a 3"×2" label sized to the detected DPI; help text points at `^PW`/`^LL` for other media). Pathway 2's in-browser PDF construction (pdf-lib + JsBarcode) is replaced by a `POST /zpl-to-pdf` endpoint on the shim that shells out to a bundled [`zpl2pdf`](https://github.com/brunoleocam/ZPL2PDF) binary (MIT licensed, .NET self-contained, `BinaryKits.Zpl` renderer). The Generated PDF section is always visible and auto-renders on printer-select. Surveyed alternatives: [`zebrafy`](https://github.com/miikanissi/zebrafy) — rejected, only decodes embedded `^GF` bitmaps, not native primitives; Labelary HTTP API — rejected, ZPL contains patient data so a third-party server is unsuitable. The bundled binary is installed via `install-zpl2pdf.sh` (POSIX) / `install-zpl2pdf.ps1` (Windows), pinned to a specific release with SHA256 verification — not vendored in git (would bloat the repo by ~250 MB). |
+| 24 | Defects-and-fixes that came out of bringing the redesign up. (a) zpl2pdf's offline-renderer `MediaBox` comes out in dots-at-the-DPI rather than points (PDF spec is points, 1 pt = 1/72 in), so a 3"×2" label produced a 12.5"×8.5" page. Workaround: shim post-processes via `gs -dPDFFitPage` to rescale to physical media size (parsed from `^PW`/`^LL` × 72 / dpi). (b) zpl2pdf's auto-detect path additionally pads the MediaBox ~1.5× wider/taller than its content, leaving the bottom-right ~33% empty — the gs rescale was carrying that padding through, making round-tripped prints come out at ~67% scale. Fix: pass `-w <in> -h <in> -u in` explicitly to zpl2pdf (same parse used for the gs target). (c) The first cut of the redesign populated the default ZPL's `^PW`/`^LL` from the printer's reported `cfg.printWidth` / `cfg.labelLength` — but those are the print HEAD width and last-calibrated label length, NOT the loaded media size. On wider-head printers (e.g. ZD-series with `^PW1280` head width), this made the hardcoded layout look "shifted left." Reverted to a hardcoded 3"×2" sized to the detected DPI; detection still populates the printer info card for diagnostics. |
