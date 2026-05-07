@@ -420,10 +420,15 @@ def _have_avahi_browse():
     return shutil.which('avahi-browse') is not None
 
 
-def discover_mdns_network_printers(timeout=5.0):
+def discover_mdns_network_printers(timeout=5.0, accept_all=False):
     """Discover Zebra raw-print services on the LAN via Avahi mDNS.
     Looks for `_pdl-datastream._tcp` (port 9100, JetDirect / raw — what
     Zebra advertises for ZPL printing).
+
+    If accept_all is False (default), filters to entries whose service name
+    + TXT records contain "zebra" (case-insensitive). This avoids polluting
+    the printer dropdown with non-Zebra printers (HP, Brother, etc.) on a
+    mixed-printer LAN. Pass accept_all=True to keep all discovered entries.
 
     Returns a list of NetworkDevice. Empty list on any failure (missing
     avahi-browse, timeout, parse error, etc.) — never raises.
@@ -463,6 +468,16 @@ def discover_mdns_network_printers(timeout=5.0):
         if key in seen:
             continue
         seen.add(key)
+
+        # Skip non-Zebra entries unless the user opted in.
+        if not accept_all:
+            txt_records = ';'.join(fields[9:]) if len(fields) > 9 else ''
+            blob = (name + ' ' + txt_records).lower()
+            if 'zebra' not in blob:
+                log.info("mdns: filtered out non-Zebra printer %r @ %s:%d "
+                         "(pass --all-mdns-printers to keep it)", name, host, port)
+                continue
+
         devices.append(NetworkDevice(name, host, port))
     return devices
 
@@ -1208,6 +1223,13 @@ def parse_args():
     p.add_argument('--no-mdns', action='store_true',
                    help='Skip mDNS auto-discovery of network printers '
                         '(Avahi). On by default when avahi-browse is on PATH.')
+    p.add_argument('--all-mdns-printers', action='store_true',
+                   help='Keep ALL mDNS-discovered printers in the registry, '
+                        'not just Zebra ones. By default, the shim filters '
+                        'auto-discovered printers whose advertisement does '
+                        'not mention "zebra" (case-insensitive in service '
+                        'name + TXT records). Off → Zebra-only (default); '
+                        'on → all printers.')
     p.add_argument('--network', action='append', default=[], metavar='[NAME=]HOST[:PORT]',
                    help='Register a network printer (repeatable). Default port 9100. '
                         'Examples: --network 192.168.1.42  or  --network "Lab GX430t=10.0.0.5:9100"')
@@ -1272,7 +1294,7 @@ def refresh_devices(args):
     # Dedupe against explicit registrations on (host, port) — those win.
     if not args.no_mdns:
         explicit_keys = {(d.host, d.port) for d in devices if isinstance(d, NetworkDevice)}
-        for d in discover_mdns_network_printers():
+        for d in discover_mdns_network_printers(accept_all=args.all_mdns_printers):
             if (d.host, d.port) in explicit_keys:
                 continue
             devices.append(d)
@@ -1309,7 +1331,13 @@ def main():
     if args.no_mdns:
         log.info('mDNS network printer discovery: DISABLED (--no-mdns).')
     elif _have_avahi_browse():
-        log.info('mDNS network printer discovery: ENABLED via avahi-browse.')
+        if args.all_mdns_printers:
+            log.info('mDNS network printer discovery: ENABLED via avahi-browse '
+                     '(no manufacturer filter; all printers will be registered).')
+        else:
+            log.info('mDNS network printer discovery: ENABLED via avahi-browse '
+                     '(Zebra-only filter on; pass --all-mdns-printers to '
+                     'register non-Zebra printers too).')
     else:
         log.info('mDNS network printer discovery: skipped (avahi-browse not on PATH; '
                  '`sudo apt install avahi-utils` to enable).')

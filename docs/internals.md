@@ -499,12 +499,15 @@ timeout. Lines starting with `=` carry resolved records in
 semicolon-delimited form:
 `=;<iface>;<proto>;<service-name>;<type>;<domain>;<host>;<addr>;<port>;<txt>`.
 IPv6 entries (fields[2] != `'IPv4'`) are skipped to avoid duplicate
-registrations for the same printer. Discovered devices are deduped against
-any already-registered `(host, port)` pairs from `--network` CLI args or
-`printers.json`; explicit registrations win on collision so users can
-override an auto-discovered display name. Any failure (missing
-`avahi-browse`, timeout, parse error) is swallowed — the function returns
-an empty list rather than raising.
+registrations for the same printer. By default, parsed entries are filtered
+to Zebra ones — the lowercased concatenation of service name + TXT records
+must contain "zebra" or the entry is dropped. `--all-mdns-printers` disables
+this; explicit `--network` / `printers.json` registrations bypass it.
+Discovered devices are deduped against any already-registered `(host, port)`
+pairs from `--network` CLI args or `printers.json`; explicit registrations
+win on collision so users can override an auto-discovered display name. Any
+failure (missing `avahi-browse`, timeout, parse error) is swallowed — the
+function returns an empty list rather than raising.
 
 The page's **Refresh printer list** button POSTs to `POST /rediscover`,
 which calls `refresh_devices` synchronously. This lets users pick up new

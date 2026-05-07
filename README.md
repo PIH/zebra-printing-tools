@@ -274,6 +274,8 @@ The page's **Refresh printer list** button POSTs to `/rediscover` on the shim, w
 
 (macOS doesn't ship `avahi-browse`; for now use explicit `--network` registrations on macOS. Windows users use Zebra's official helper which has its own discovery.)
 
+By default the shim filters auto-discovered printers to Zebra ones only — entries whose service name + TXT records don't contain "zebra" (case-insensitive) are dropped. The HP / Brother / etc. printers on a typical mixed-printer LAN won't pollute the dropdown. Pass `--all-mdns-printers` to disable the filter (useful if you have a Zebra that for some reason doesn't advertise its make in mDNS — explicit `--network` registrations also bypass the filter and are always honored).
+
 #### Finding a Zebra's IP
 
 On Linux with Avahi installed, the shim auto-discovers Zebra printers advertising `_pdl-datastream._tcp` (see "Auto-discovery via mDNS" above) — you usually don't need to look up the IP manually. The hints below are for cases where mDNS isn't available (macOS without dns-sd plumbing, network segments where mDNS is filtered, or if you've passed `--no-mdns`).
