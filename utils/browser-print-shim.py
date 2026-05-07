@@ -96,6 +96,14 @@ DEFAULT_CONVERT_DPI = 300         # GX430t native; override with --convert-dpi
 DEFAULT_CONVERT_MODE = 'dither'   # 'dither' (Floyd-Steinberg) or 'threshold'
 SHIM_VERSION = '0.1.0-shim'
 
+# Several startup warnings only make sense when the shim is the primary
+# helper (Linux: no Browser Print to delegate to). When alongside Zebra's
+# Browser Print on Win/Mac, Browser Print handles USB enumeration and
+# PDF→ZPL conversion; the shim is just there for /zpl-to-pdf, so missing
+# Ghostscript / no-USB-printers-found / no-printers-registered are
+# expected and not problems.
+IS_LINUX = sys.platform.startswith('linux')
+
 # Filled in from CLI args at startup; read by the convert handler.
 CONVERT_DPI  = DEFAULT_CONVERT_DPI
 CONVERT_MODE = DEFAULT_CONVERT_MODE
@@ -375,6 +383,14 @@ def udev_info(path):
 
 def discover_usb_printers():
     devices = []
+    if not IS_LINUX:
+        # /dev/usb/lp* is a Linux-kernel-driver path — doesn't exist on
+        # macOS or Windows. The shim has no USB support on those platforms;
+        # users run Browser Print as the primary helper, which uses each
+        # OS's native printer subsystem. Silently return [] rather than
+        # logging a "no USB printers found" warning that's structurally
+        # impossible to satisfy.
+        return devices
     paths = sorted(set(glob.glob('/dev/usb/lp*') + glob.glob('/dev/usblp*')))
     if not paths:
         log.info('No USB printers found under /dev/usb/lp* or /dev/usblp*. '
@@ -1364,20 +1380,28 @@ def refresh_devices(args):
 
     registry.replace(devices)
     if not devices:
-        log.warning('No printers registered. Either:')
-        log.warning('  - Plug in a USB Zebra (and ensure your user has access to /dev/usb/lp*)')
-        log.warning('  - Pass --network HOST[:PORT] for a network printer')
-        log.warning('  - Add network printers to %s under "networkPrinters"', args.config)
-        if args.no_mdns:
-            log.warning('  - Re-enable mDNS auto-discovery by dropping --no-mdns')
-        elif not _have_avahi_browse():
-            log.warning('  - Or install avahi-utils so the shim can auto-discover via mDNS')
-        elif not args.all_mdns_printers:
-            log.warning('  - mDNS discovery ran but the Zebra-only filter dropped any non-Zebra '
-                        'printers found. Pass --all-mdns-printers to keep them.')
+        if not IS_LINUX:
+            # Typical Win/Mac use is "shim alongside Browser Print" — the
+            # shim is purely a /zpl-to-pdf endpoint and has no need to
+            # register printers itself. BP enumerates them.
+            log.info('No printers registered with this shim. Browser Print presumably handles '
+                     'printer enumeration on this platform; this shim is only serving '
+                     '/zpl-to-pdf for the page\'s PDF preview.')
         else:
-            log.warning("  - mDNS discovery ran but found no printers advertising "
-                        "'_pdl-datastream._tcp' on this network.")
+            log.warning('No printers registered. Either:')
+            log.warning('  - Plug in a USB Zebra (and ensure your user has access to /dev/usb/lp*)')
+            log.warning('  - Pass --network HOST[:PORT] for a network printer')
+            log.warning('  - Add network printers to %s under "networkPrinters"', args.config)
+            if args.no_mdns:
+                log.warning('  - Re-enable mDNS auto-discovery by dropping --no-mdns')
+            elif not _have_avahi_browse():
+                log.warning('  - Or install avahi-utils so the shim can auto-discover via mDNS')
+            elif not args.all_mdns_printers:
+                log.warning('  - mDNS discovery ran but the Zebra-only filter dropped any non-Zebra '
+                            'printers found. Pass --all-mdns-printers to keep them.')
+            else:
+                log.warning("  - mDNS discovery ran but found no printers advertising "
+                            "'_pdl-datastream._tcp' on this network.")
 
 
 def main():
@@ -1389,9 +1413,18 @@ def main():
     if _have_ghostscript():
         log.info('PDF conversion: enabled (gs %s, dpi=%d, mode=%s)',
                  _gs_version_str(), CONVERT_DPI, CONVERT_MODE)
-    else:
+    elif IS_LINUX:
+        # On Linux the shim is the primary helper; missing Ghostscript
+        # means /convert (PDF→ZPL) is broken. Genuine WARNING.
         log.warning('PDF conversion: DISABLED — Ghostscript not found. '
                     'Install with `sudo apt install ghostscript` to enable /convert.')
+    else:
+        # On Win/Mac the shim is typically alongside Browser Print, which
+        # handles its own PDF→ZPL conversion. Missing Ghostscript here is
+        # expected, not a problem.
+        log.info('PDF conversion via /convert (PDF→ZPL): not enabled (Ghostscript not '
+                 'installed). Browser Print handles its own PDF→ZPL on Windows/macOS, '
+                 'so this is only relevant if you want this shim to handle /convert too.')
     if _have_zpl2pdf():
         log.info('zpl2pdf %s found — POST /zpl-to-pdf is enabled.',
                  _zpl2pdf_path())

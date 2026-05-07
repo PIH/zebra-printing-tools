@@ -298,7 +298,9 @@ async function refreshHelperInfo() {
     const conv = cfg.supportedConversions || {};
     pdfPreviewSupported = Array.isArray(conv.zpl) && conv.zpl.includes('pdf');
     helperIsShim = typeof cfg.version === 'string' && /shim/i.test(cfg.version);
-    pdfShimBaseUrl = PRIMARY_HELPER_URL;
+    // pdfShimBaseUrl was already set by loadConfig() based on shim*Port +
+    // location.protocol — don't reset it here (early versions did, which
+    // clobbered the configured URL before probeShim() could read it).
     setText('apiInfo', `helper: ${platform}, API L${apiLevel}`, 'pill ok');
     log(`Browser Print: platform=${platform}, api_level=${apiLevel}, ` +
         `supportedConversions=${JSON.stringify(conv)}` +
