@@ -11,11 +11,14 @@ Two separately-downloaded artifacts that are easy to confuse:
 | Artefact | What it is | Where it runs |
 |---|---|---|
 | **Browser Print application** (the *helper*) | Native daemon (~3 MB) | OS background service in your user session |
-| **Browser Print SDK** (`BrowserPrint-3.x.x.min.js` + `BrowserPrint-Zebra-1.x.x.min.js`) | JS library | The web page |
+| **Helper-API client** (`lib/zebra-browser-print.js`) | MPL-2.0 vanilla-JS library, this repo | The web page |
 
-The SDK only makes API calls — it cannot print on its own. **You need both.**
-We learned this the hard way; the v3.1.250 SDK bundle was added first, but
-nothing worked until the helper application was also installed.
+The client only makes API calls — it cannot print on its own. **You need both.**
+We learned this the hard way; the original prototype loaded Zebra's proprietary
+`BrowserPrint-3.x.x.min.js` + `BrowserPrint-Zebra-1.x.x.min.js` bundle, but
+nothing worked until the helper application was also installed. We later
+re-implemented the client side from the documented HTTP contract (see `lib/`)
+to get a clean MPL-2.0 licensing posture; the helper itself is unchanged.
 
 ### Endpoints (verified by inspecting `BrowserPrint-3.1.250.min.js`)
 
@@ -44,32 +47,38 @@ The first version of our prototype used `fetch()` directly against these.
 The current version uses the SDK so we get the HTTP↔HTTPS switch, parsed
 status, and `convertAndSendFile` for free.
 
-### SDK shape (transcribed from Zebra's JSDoc when we vendored the SDK; for the canonical reference see Zebra's developer site — [README §7](../README.md#zebras-documentation))
+### Client API surface
 
-- `BrowserPrint.getApplicationConfiguration(success, error)` — tells you the
-  helper's `platform`, `api_level`, and `supportedConversions`.
-- `BrowserPrint.getDefaultDevice("printer", success, error)`
-- `BrowserPrint.getLocalDevices(success, error, "printer")`
-- `device.send(data, success, error)` — raw bytes (ZPL string).
-- `device.read(success, error)` — read raw response bytes.
-- `device.sendFile(url|blob, success, error)` — send file as-is.
-- `device.convertAndSendFile(url|blob, success, error, options)` — auto-convert
-  (image / PDF) and send. *PDF requires `options.featureKey`.* Client API
-  level 4.
-- `Zebra.Printer` wrapper (loaded from `BrowserPrint-Zebra-1.x.x.min.js`):
-  - `printer.getStatus(success?, failure?)` → `Zebra.Printer.Status` with
-    `isPrinterReady()` and `getMessage()`. Returns a Promise if callbacks are
-    omitted.
-  - `printer.getConfiguration()` — full printer config.
-  - `printer.getConvertedResource(blob, options?)` — *preview* the converted
-    ZPL without sending.
-  - `printer.printImageAsLabel(...)` — image-as-label helper.
-  - `printer.getSGD` / `setSGD` / `setThenGetSGD` — Zebra Set/Get/Do
-    parameter access.
-  - `printer.isPrinterReady()` — quick boolean check.
+The page now uses `lib/zebra-browser-print.js` (MPL-2.0, this repo) — a
+vanilla-JS reimplementation of the subset of Zebra's proprietary SDK we
+actually use. Same wire protocol; promise-only API; per-Device command
+queue so concurrent ops don't interleave on the wire.
 
-The Zebra wrapper's queries are synchronized — calls are queued so a status
-read won't race a print job that's still flushing.
+- `ZebraBrowserPrint.getApplicationConfiguration()` → helper's `platform`,
+  `api_level`, `version`, `supportedConversions`.
+- `ZebraBrowserPrint.getDefaultDevice('printer')` → `Device` or `null`.
+- `ZebraBrowserPrint.getLocalDevices('printer')` → `Device[]`.
+- `device.send(zpl: string)` → raw bytes.
+- `device.read()` → single-shot read of buffered bytes.
+- `device.sendAndRead(zpl, opts?)` → send + drain reply. `opts.until` exits
+  on a terminator (e.g. `'\x03'` for ETX-framed status/info/config replies);
+  no `until` falls back to drain-until-quiet.
+- `device.convertAndSendFile(blob, options?)` → multipart `POST /convert`
+  with `{options, device}` JSON + blob; default action is `"print"`. PDF
+  feature keys must be wrapped as `{ keys: { pdf: "<key>" } }` —
+  `options.keys.<fromFormat>` is what Zebra's helper actually reads.
+- `new ZebraBrowserPrint.Printer(device)` (high-level wrapper):
+  - `printer.getStatus()` → `Status` with `isPrinterReady()` and
+    `getMessage()`.
+  - `printer.getConfiguration()` → `{ printWidth, labelLength,
+    firmwareVersion, linkOSVersion, settings }`.
+  - `printer.getInfo()` → `{ model, firmware, dpm, memory }`.
+  - `printer.getSGD(name)` → unwrapped string value.
+
+For Zebra's own JSDoc (covering methods we deliberately didn't reimplement —
+`sendFile`, `printImageAsLabel`, `getConvertedResource`, `setSGD`,
+`setThenGetSGD`, the queue/Promise dual API, image-resize helpers, etc.)
+see [README §7](../README.md#zebras-documentation).
 
 ---
 
