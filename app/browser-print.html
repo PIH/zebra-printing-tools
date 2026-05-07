@@ -375,8 +375,11 @@ function selectDevice(d) {
   setDiagEnabled(enabled);
   clearPrinterInfo();
   if (d) {
-    // Populate connection / UID immediately; detection fills the rest.
-    updatePrinterInfo({ device: d });
+    // Populate the two synchronous-from-handle fields right away; the four
+    // query-dependent ones are put into "querying…" loading state by
+    // refreshAll() below until detection returns.
+    setInfoField('info-connection', d.connection || '?');
+    setInfoField('info-uid',        d.uid || '?');
     // Serialise status → detection through refreshAll(). The SDK has a
     // single per-Printer queue; firing status and detection together causes
     // them to enqueue against each other. Each query through Zebra's
@@ -496,6 +499,11 @@ async function refreshAll() {
   if (!zebra || refreshInFlight) return;
   refreshInFlight = true;
   $('refreshPrinter').disabled = true;
+  // Mark the four query-dependent info-card fields as in-flight so the
+  // user sees "querying…" instead of stale values from a prior cycle.
+  // Connection and UID stay as-is (they're populated from the synchronous
+  // device handle and don't change between queries).
+  setPrinterInfoLoading();
   try {
     await refreshStatus();
     await detectPrinterCapabilities();
@@ -530,10 +538,15 @@ $('refreshPrinter').addEventListener('click', refreshAll);
 // Density state. Tracked in *both* representations so the printer-info
 // card can display the exact reported value.
 //   densityDpi — what the printer would call its dpi (snapped to standard
-//                Zebra labelled values: 152/203/300/600)
+//                Zebra labelled values: 152/203/300/600). null until
+//                detection populates it; the info card's Resolution row
+//                renders "querying…" while refreshAll is running and "—"
+//                if detection completed without yielding a value.
 //   densityDpm — exact dots-per-mm; only populated when the printer reported
 //                "N/mm" directly.
-let densityDpi = 300;
+// regenerateDefaultZpl falls back to 300 dpi when densityDpi is null so
+// the textarea has *something* to render before detection completes.
+let densityDpi = null;
 let densityDpm = null;
 
 // Unit conversions between dpi (dots-per-inch) and dpm (dots-per-mm).
@@ -747,11 +760,16 @@ async function detectPrinterCapabilities() {
   }
 
   // Store detected values in lastDetected for use by ZPL generation.
+  // densityDpi may be null (detection didn't return a real value); the
+  // consumers — regenerateDefaultZpl and generatePdfFromZpl — both use
+  // `lastDetected.dpi || <fallback>`, and the widthDots/heightDots
+  // fallbacks below also coalesce.
+  const fallbackDpi = densityDpi || 300;
   lastDetected = {
     dpi:        densityDpi,
     dpm:        densityDpm,
-    widthDots:  detectedWidthDots  || Math.round(3.0 * densityDpi),
-    heightDots: detectedHeightDots || Math.round(2.0 * densityDpi),
+    widthDots:  detectedWidthDots  || Math.round(3.0 * fallbackDpi),
+    heightDots: detectedHeightDots || Math.round(2.0 * fallbackDpi),
     model:      (infoRes.status === 'fulfilled' && infoRes.value) ? infoRes.value.model : null,
   };
 
@@ -769,45 +787,75 @@ async function detectPrinterCapabilities() {
 // =============================================================================
 // Printer info panel — elevated display of what detection learned
 // =============================================================================
+// All six fields are kept in one of three display states:
+//
+//   '—'         no printer selected (clearPrinterInfo)
+//   'querying…' a printer is selected and a query is in flight
+//               (setPrinterInfoLoading)
+//   <value>     query completed; field rendered with what we got, or
+//               '—' if that specific field wasn't returned
+//
+// Connection and UID come from the SDK's Device handle synchronously, so
+// they short-circuit the loading state — they're populated as soon as
+// the user selects a printer. Model, firmware, Link-OS, and resolution
+// all need a bidirectional round-trip through the helper, so they go
+// through 'querying…' until refreshAll() completes.
+//
+// We deliberately do NOT use device.name as a stand-in for the model: on
+// some helpers it's the formal model string, on others it's an internal
+// identifier. Showing it pre-detection would mean either a flicker
+// ('GX430t' → 'ZTC GX430t-300dpi') or, worse, misleading content if
+// detection fails. The placeholder is honest about what's known.
+
 const INFO_FIELDS = ['info-model', 'info-firmware', 'info-linkos',
                      'info-dpi', 'info-connection', 'info-uid'];
 
+const QUERYING_FIELDS = ['info-model', 'info-firmware', 'info-linkos', 'info-dpi'];
+
+const setInfoField = (id, text, loading = false) =>
+  setText(id, text, loading ? 'info-value muted' : 'info-value');
+
 function clearPrinterInfo() {
-  INFO_FIELDS.forEach(id => setText(id, '—'));
+  INFO_FIELDS.forEach(id => setInfoField(id, '—'));
+}
+
+// Mark the four query-dependent fields as in-flight. Connection and UID
+// are populated separately by the caller from the synchronous device
+// handle, so they're not touched here.
+function setPrinterInfoLoading() {
+  QUERYING_FIELDS.forEach(id => setInfoField(id, 'querying…', true));
 }
 
 function updatePrinterInfo({ device, info, config } = {}) {
   if (device) {
-    setText('info-connection', device.connection || '?');
-    setText('info-uid',        device.uid || '?');
-    // The dropdown's display name is also a useful pre-detection hint.
-    if (!info && device.name) setText('info-model', device.name);
+    setInfoField('info-connection', device.connection || '?');
+    setInfoField('info-uid',        device.uid || '?');
   }
-  if (info) {
-    if (info.model)    setText('info-model',    info.model);
-    if (info.firmware) setText('info-firmware', info.firmware);
-  }
-  if (config) {
-    // Configuration's firmwareVersion is the canonical source if both are
-    // present; ~hi just gives the leading version token.
-    if (config.firmwareVersion) setText('info-firmware', config.firmwareVersion);
-    if (config.linkOSVersion && config.linkOSVersion !== '0') {
-      setText('info-linkos', config.linkOSVersion);
-    }
-  }
+  // Each of the four query-dependent fields renders the real value if
+  // detection returned one, or "—" if it didn't. No fallback to
+  // device.name for model — see comment block above.
+  setInfoField('info-model',    (info && info.model) ? info.model : '—');
+  setInfoField('info-firmware',
+    (config && config.firmwareVersion) ? config.firmwareVersion :
+      (info && info.firmware) ? info.firmware : '—');
+  setInfoField('info-linkos',
+    (config && config.linkOSVersion && config.linkOSVersion !== '0')
+      ? config.linkOSVersion : '—');
   updateInfoResolution();
 }
 
 // Renders the Resolution row of the printer info card.
 // Always shows dpi as primary, with dots/mm in parentheses when known.
+// Renders "—" when detection didn't yield a real density (densityDpi
+// stays null in that case).
 function updateInfoResolution() {
   if (densityDpi == null && densityDpm == null) {
-    setText('info-dpi', '—');
+    setInfoField('info-dpi', '—');
     return;
   }
   const dpi = densityDpi;
   const dpm = densityDpm;
-  setText('info-dpi',
+  setInfoField('info-dpi',
     dpm != null ? `${dpi} dpi (${formatDensityValue(dpm)} dots/mm)` : `${dpi} dpi`);
 }
 
