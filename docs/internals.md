@@ -44,7 +44,7 @@ The first version of our prototype used `fetch()` directly against these.
 The current version uses the SDK so we get the HTTP↔HTTPS switch, parsed
 status, and `convertAndSendFile` for free.
 
-### SDK shape (verified from the bundled JSDoc)
+### SDK shape (transcribed from Zebra's JSDoc when we vendored the SDK; for the canonical reference see Zebra's developer site — [README §7](../README.md#zebras-documentation))
 
 - `BrowserPrint.getApplicationConfiguration(success, error)` — tells you the
   helper's `platform`, `api_level`, and `supportedConversions`.
