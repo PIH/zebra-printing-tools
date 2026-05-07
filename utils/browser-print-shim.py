@@ -43,14 +43,17 @@ Network printers can be added two ways:
        python3 utils/browser-print-shim.py --network 'Lab GX430t=192.168.1.42:9100'
      Format is [name=]host[:port]. Default port is 9100 (raw / JetDirect).
 
-  2. In app/config.json under `networkPrinters`:
+  2. In app/config.json under `printers`:
        {
-         "networkPrinters": [
+         "printers": [
            {"name": "Lab GX430t", "host": "192.168.1.42", "port": 9100}
          ]
        }
-     The same file is also read by the page for `shimPort` and `featureKey`.
-     See README §4a for the full schema.
+     The shim picks up entries that have a `host` field; entries without
+     a host are page-side metadata (display name, label dimensions) and
+     are ignored here. The same file is also read by the page for
+     `shimPort`, `featureKey`, and the per-printer overrides. See
+     README §4a for the full schema.
 
 Usage:
     python3 utils/browser-print-shim.py
@@ -425,8 +428,10 @@ def _default_config_path():
 def load_config(config_path):
     """Read the JSON config file, returning a dict (empty if absent or
     unparseable). Schema documented in app/browser-print.html's loadConfig
-    block — we only consume `shimPort` and `networkPrinters` here, but
-    the file is shared with the page (which also uses `featureKey`)."""
+    block — we only consume `shimPort`, `shimHttpsPort`, and `printers`
+    (filtered to entries with a `host` field) here, but the file is
+    shared with the page (which also uses `featureKey` and the rest of
+    the `printers` entries)."""
     if not os.path.exists(config_path):
         return {}
     try:
@@ -439,18 +444,27 @@ def load_config(config_path):
 
 def load_network_printers(cfg):
     """Extract NetworkDevice objects from a parsed config dict's
-    `networkPrinters` array. Each entry: {name, host, port? (default 9100)}.
+    `printers` array. Only entries with a `host` field are network
+    registrations; entries without `host` (e.g., a UID-keyed entry that
+    just sets a display name or label dimensions for a printer the page
+    discovers via Browser Print) are page-side metadata and ignored
+    here. Required fields per network entry: `host` and `name`. `port`
+    defaults to 9100.
 
     Per-printer "configured" logging is centralised in refresh_devices() so
     a steady-state rescan doesn't repeat the same lines on every tick;
     schema errors stay inline because they're actionable and rare.
     """
     out = []
-    for entry in cfg.get('networkPrinters', []) or []:
+    for entry in cfg.get('printers', []) or []:
+        if not isinstance(entry, dict) or 'host' not in entry:
+            # Page-side metadata (uid-keyed entry) or invalid shape — not
+            # the shim's concern. The page validates its half.
+            continue
         try:
             out.append(NetworkDevice(entry['name'], entry['host'], int(entry.get('port', 9100))))
         except Exception as e:
-            log.warning('Bad networkPrinters entry %s: %s', entry, e)
+            log.warning('Bad printers entry %s: %s', entry, e)
     return out
 
 
@@ -1372,7 +1386,7 @@ def _log_no_printers(args):
     log.warning('No printers registered. Either:')
     log.warning('  - Plug in a USB Zebra (and ensure your user has access to /dev/usb/lp*)')
     log.warning('  - Pass --network HOST[:PORT] for a network printer')
-    log.warning('  - Add network printers to %s under "networkPrinters"', args.config)
+    log.warning('  - Add network printers to %s under "printers" (entries with a "host" field)', args.config)
     if args.no_mdns:
         log.warning('  - Re-enable mDNS auto-discovery by dropping --no-mdns')
     elif not _have_avahi_browse():

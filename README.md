@@ -216,18 +216,37 @@ One optional JSON file consumed by both the page (via fetch from the served orig
   "shimPort":      9102,
   "shimHttpsPort": 9103,
   "featureKey":    "AbsQM…",
-  "networkPrinters": [
-    { "name": "Lab GX430t", "host": "192.168.1.42", "port": 9100 }
+  "printers": [
+    { "host": "192.168.1.42", "port": 9100, "name": "Backstock GX430t",
+      "labelWidth": 4, "labelHeight": 6, "labelUnits": "in" },
+    { "uid": "usb:GX430t-12345", "name": "Lab GX430t",
+      "labelWidth": 3, "labelHeight": 2 }
   ]
 }
 ```
+
+Top-level keys:
 
 | Key | Read by | Purpose |
 |---|---|---|
 | `shimPort` | page + shim | Where the shim binds (HTTP). Default 9100. Must differ from 9100 *and* 9101 when Browser Print is running — Browser Print binds both. See `shimPort` notes below. |
 | `shimHttpsPort` | page + shim | Where the shim binds (HTTPS, used when running with `--https`). Default 9101. Same conflict reasoning as `shimPort`. |
 | `featureKey` | page | Zebra PDF feature key for `convertAndSendFile`. |
-| `networkPrinters` | shim | List of `{name, host, port?}` entries; treated the same as `--network` flags. |
+| `printers` | page + shim | Per-printer overrides. Network entries (with `host`) double as shim registrations; non-network entries (with `uid`) are page-only metadata. See per-entry table below. |
+
+Per-entry fields under `printers`:
+
+| Field | Required | Read by | Purpose |
+|---|---|---|---|
+| `host` | one of `host`/`uid` | shim + page | Network printer hostname/IP. When set, the shim registers it as a `NetworkDevice`; the page uses `net:<host>:<port>` as the lookup key (matching the shim's uid format). |
+| `port` | optional | shim + page | TCP port (default 9100, raw / JetDirect). Only meaningful with `host`. |
+| `uid` | one of `host`/`uid` | page | Explicit lookup key for printers discovered by other means (Browser Print enumeration on Win/Mac, USB on Linux). Copy from the Printer Info card. |
+| `name` | optional | page | Friendly display name for the dropdown. Overrides whatever the helper returned (Browser Print on Windows can return opaque names). |
+| `labelWidth` | optional | page | Positive number, width in `labelUnits`. Drives `^PW` in the default ZPL and the `fitTo` argument for *Print uploaded PDF*. Set with `labelHeight`. |
+| `labelHeight` | optional | page | Positive number, height in `labelUnits`. Set with `labelWidth`. |
+| `labelUnits` | optional | page | `"in"` (default) or `"mm"`. |
+
+A printer with no entry falls back to a 3"×2" label (the default the page's sample ZPL was tuned for). The Printer Info card's *Label* row shows whether the dimensions in effect came from `config.json` or the default.
 
 The file is gitignored — never committed. The shim's `--http-port`, `--https-port`, and `--network` CLI flags still work and override file values when given.
 
@@ -343,10 +362,10 @@ python3 utils/browser-print-shim.py --network 192.168.1.42
 python3 utils/browser-print-shim.py --network 'Lab GX430t=192.168.1.42:9100' \
                                     --network 'Pharmacy GX430t=192.168.1.43'
 ```
-or in `app/config.json` under `networkPrinters` (same file the page reads — see §4a "Runtime config"):
+or in `app/config.json` under `printers` (same file the page reads — see §4a "Runtime config"). Entries with a `host` field are the network registrations:
 ```json
 {
-  "networkPrinters": [
+  "printers": [
     { "name": "Lab GX430t",      "host": "192.168.1.42", "port": 9100 },
     { "name": "Pharmacy GX430t", "host": "192.168.1.43" }
   ]
@@ -446,7 +465,7 @@ app/                                ← everything served to the browser
                                       Both .min.js files are from Zebra's "Browser Print SDK v3.1.250" download
                                       (see §7 Further reading for the developer-site link, JSDoc reference, and
                                       sample app); we vendor them so the page works offline.
-  config.json                       ← optional, gitignored: runtime config (shimPort, featureKey, networkPrinters).
+  config.json                       ← optional, gitignored: runtime config (shimPort, featureKey, printers).
                                       Read by both the page (via fetch) and the shim (via filesystem). See §4a.
 utils/                              ← server-side helpers (run by the user, not loaded in the browser)
   browser-print-shim.py             ← Linux dev shim (Browser Print API substitute) — supports USB and network transports;

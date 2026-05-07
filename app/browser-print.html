@@ -96,6 +96,7 @@
     <div><span class="info-label">Firmware</span>  <span class="info-value" id="info-firmware">—</span></div>
     <div><span class="info-label">Link-OS</span>   <span class="info-value" id="info-linkos">—</span></div>
     <div><span class="info-label">Resolution</span><span class="info-value" id="info-dpi">—</span></div>
+    <div><span class="info-label">Label</span>     <span class="info-value" id="info-label">—</span></div>
     <div><span class="info-label">Connection</span><span class="info-value" id="info-connection">—</span></div>
     <div><span class="info-label">UID</span>       <span class="info-value" id="info-uid">—</span></div>
   </div>
@@ -412,7 +413,14 @@ async function discover() {
     allDevices.forEach((d, i) => {
       const o = document.createElement('option');
       o.value = String(i);
-      o.textContent = `${d.name} [${d.connection}]${defaultDev && d.uid === defaultDev.uid ? ' ★ default' : ''}`;
+      // Friendly-name precedence: config.printers[].name (operator-curated)
+      // → helper-supplied d.name → uid (uglier but always present). The
+      // helper's name on Windows is whatever Browser Print's Java helper
+      // returns, which can be opaque on some setups; the config override
+      // exists specifically to give the operator a way to fix that.
+      const cfg = printerConfigFor(d.uid);
+      const displayName = (cfg && cfg.name) || d.name || d.uid || '?';
+      o.textContent = `${displayName} [${d.connection}]${defaultDev && d.uid === defaultDev.uid ? ' ★ default' : ''}`;
       sel.appendChild(o);
     });
 
@@ -450,6 +458,10 @@ function selectDevice(d) {
     // refreshAll() below until detection returns.
     setInfoField('info-connection', d.connection || '?');
     setInfoField('info-uid',        d.uid || '?');
+    // Label dims are synchronous (config + uid lookup, no round-trip)
+    // so we set them here alongside connection/uid rather than waiting
+    // for detection to complete.
+    setInfoField('info-label',      formatLabelDimensions(labelDimensionsForUid(d.uid)));
     // Serialise status → detection through refreshAll(). The SDK has a
     // single per-Printer queue; firing status and detection together causes
     // them to enqueue against each other. Each query through Zebra's
@@ -878,7 +890,7 @@ async function detectPrinterCapabilities() {
 // detection fails. The placeholder is honest about what's known.
 
 const INFO_FIELDS = ['info-model', 'info-firmware', 'info-linkos',
-                     'info-dpi', 'info-connection', 'info-uid'];
+                     'info-dpi', 'info-label', 'info-connection', 'info-uid'];
 
 const QUERYING_FIELDS = ['info-model', 'info-firmware', 'info-linkos', 'info-dpi'];
 
@@ -889,9 +901,9 @@ function clearPrinterInfo() {
   INFO_FIELDS.forEach(id => setInfoField(id, '—'));
 }
 
-// Mark the four query-dependent fields as in-flight. Connection and UID
-// are populated separately by the caller from the synchronous device
-// handle, so they're not touched here.
+// Mark the four query-dependent fields as in-flight. Connection, UID,
+// and Label are populated separately by the caller from synchronous
+// data (device handle + config lookup), so they're not touched here.
 function setPrinterInfoLoading() {
   QUERYING_FIELDS.forEach(id => setInfoField(id, 'querying…', true));
 }
@@ -900,6 +912,7 @@ function updatePrinterInfo({ device, info, config } = {}) {
   if (device) {
     setInfoField('info-connection', device.connection || '?');
     setInfoField('info-uid',        device.uid || '?');
+    setInfoField('info-label',      formatLabelDimensions(labelDimensionsForUid(device.uid)));
   }
   // Each of the four query-dependent fields renders the real value if
   // detection returned one, or "—" if it didn't. No fallback to
@@ -1038,16 +1051,22 @@ function setDiagEnabled(enabled) {
 // Default ZPL written into the textarea on printer-select. Header / body /
 // barcode are now hard-coded — the previous form inputs are gone.
 //
-// Dimensions: hardcoded 3"×2" label scaled to the detected DPI. The
-// printer's reported printWidth / labelLength are NOT used here; those
-// are the print HEAD width and last-calibrated length, not the loaded
-// media size. Layout constants (font sizes, positions) were tuned for a
-// 3"×2" 300dpi label; using a wider ^PW would make the content look
-// left-shifted on the wider print area. Whoever needs a different size
-// edits ^PW / ^LL directly in the textarea.
-function defaultZpl({ dpi }) {
-  const widthDots = Math.round(3 * dpi);
-  const heightDots = Math.round(2 * dpi);
+// Dimensions: caller passes widthIn/heightIn (resolved per-printer via
+// `app/config.json`'s `printers[]`, falling back to 3"×2"). The
+// printer's reported printWidth / labelLength are NOT used here —
+// printWidth is the print HEAD width (often wider than loaded media on
+// ZD-series), labelLength is last-calibrated length. The config-driven
+// values are the user-curated source of truth.
+//
+// Layout constants (font sizes, ^FO positions, ^BY barcode width) are
+// tuned for a 3"×2" 300dpi label; on a larger label they print in the
+// upper-left corner of the media at the same physical size. Whoever
+// needs a different layout edits the textarea content; what we own
+// here is the ^PW/^LL framing so the printer feeds the right amount
+// of media and `fitToFromZplTextarea` can read back correct bounds.
+function defaultZpl({ dpi, widthIn, heightIn }) {
+  const widthDots = Math.round(widthIn * dpi);
+  const heightDots = Math.round(heightIn * dpi);
   return [
     '^XA',
     '^CI28',
@@ -1148,7 +1167,15 @@ async function generatePdfFromZpl() {
 
 function regenerateDefaultZpl() {
   if (!lastDetected) return;
-  const zpl = defaultZpl({ dpi: lastDetected.dpi || 300 });
+  // Per-printer label dimensions come from `app/config.json`'s `printers[]`
+  // matched on `device.uid`; missing entry → 3"×2" default. We re-resolve
+  // on every regenerate so a printer-change picks up new dims.
+  const dims = labelDimensionsForUid(device && device.uid);
+  const zpl = defaultZpl({
+    dpi: lastDetected.dpi || 300,
+    widthIn:  dims.widthIn,
+    heightIn: dims.heightIn,
+  });
   $('zpl').value = zpl;
   defaultZplSnapshot = zpl;
   if (pdfPreviewSupported) {
@@ -1193,17 +1220,19 @@ $('customPdfFile').addEventListener('change', () => {
 // they tune it for their loaded media — so anchoring upload-PDF scaling
 // on it gives the same printable area the rest of the page assumes.
 //
-// Falls back to 3"×2" at the detected DPI (or 300 if undetected) — the
-// same defaults defaultZpl() uses, so a fresh-loaded page with no
-// editing prints sensibly even before any printer is selected.
+// Falls back, in order: `app/config.json` `printers[uid].labelWidth/Height`
+// → 3"×2". This matches what `defaultZpl` would have baked into ^PW/^LL
+// had the user not edited them out, so the upload-PDF scaling stays
+// consistent with the rest of the page.
 function fitToFromZplTextarea() {
   const zplText = $('zpl').value;
   const dpi = (lastDetected && lastDetected.dpi) || 300;
   const pw = zplText.match(/\^PW(\d+)/);
   const ll = zplText.match(/\^LL(\d+)/);
+  const dims = labelDimensionsForUid(device && device.uid);
   return {
-    width:  pw ? parseInt(pw[1], 10) : Math.round(3 * dpi),
-    height: ll ? parseInt(ll[1], 10) : Math.round(2 * dpi),
+    width:  pw ? parseInt(pw[1], 10) : Math.round(dims.widthIn  * dpi),
+    height: ll ? parseInt(ll[1], 10) : Math.round(dims.heightIn * dpi),
   };
 }
 
@@ -1352,8 +1381,15 @@ function convertAndSendFileViaSdk(blob) {
 //     "shimPort":       9102,                  // where the shim binds (HTTP).  Default 9100.
 //     "shimHttpsPort":  9103,                  // where the shim binds (HTTPS). Default 9101.
 //     "featureKey":     "AbsQM…",              // Zebra PDF feature key. See below.
-//     "networkPrinters": [                     // Read by shim only.
-//       { "name": "Lab GX430t", "host": "192.168.1.42", "port": 9100 }
+//     "printers": [                            // Per-printer overrides.
+//       // Network printer: shim registers it; page uses host+port to match
+//       // the runtime uid (`net:<host>:<port>`).
+//       { "host": "192.168.1.42", "port": 9100, "name": "Backstock GX430t",
+//         "labelWidth": 4, "labelHeight": 6, "labelUnits": "in" },
+//       // Non-network printer: page-side metadata only. `uid` is the
+//       // value shown in the Printer Info card.
+//       { "uid": "usb:GX430t-12345", "name": "Lab GX430t",
+//         "labelWidth": 3, "labelHeight": 2 }
 //     ]
 //   }
 //
@@ -1380,6 +1416,57 @@ function convertAndSendFileViaSdk(blob) {
 // Browser Print SDK is hardcoded to 9100/9101 in its .min.js, so SDK
 // calls always go there regardless; shim*Port only governs /zpl-to-pdf.
 let featureKey = '';
+
+// Per-printer config loaded from `app/config.json`'s `printers` array.
+// Keyed by the printer's runtime uid (network entries derive their key
+// as `net:<host>:<port>` so they match the shim's NetworkDevice uid
+// format; everything else uses the explicit `uid` field on the entry).
+// Entries hold `{ name?, widthIn?, heightIn? }` — the full set of
+// page-side overrides for one printer.
+const printerConfig = new Map();
+
+// 3" × 2" is the canonical label assumed by `defaultZpl` (the layout
+// constants — font sizes, ^FO positions, ^BY barcode width — were
+// tuned for this size at 300 dpi). When a user has a different label
+// size loaded but no `app/config.json` entry for that printer, we fall
+// back to these dimensions; the layout still prints in the upper-left
+// of whatever media is loaded but at least the ^PW/^LL match the
+// content footprint.
+const DEFAULT_LABEL_WIDTH_IN  = 3;
+const DEFAULT_LABEL_HEIGHT_IN = 2;
+
+function printerConfigFor(uid) {
+  return uid ? printerConfig.get(uid) : undefined;
+}
+
+// Resolves the label dimensions to use for this printer:
+//   - if `printers[]` has an entry for this uid with both
+//     labelWidth/labelHeight set, return those (in inches, mm
+//     auto-converted)
+//   - otherwise fall back to the 3"×2" default.
+// `source` is for human-readable provenance in the info card.
+function labelDimensionsForUid(uid) {
+  const entry = printerConfigFor(uid);
+  if (entry && Number.isFinite(entry.widthIn) && Number.isFinite(entry.heightIn)) {
+    return { widthIn: entry.widthIn, heightIn: entry.heightIn, source: 'config' };
+  }
+  return {
+    widthIn:  DEFAULT_LABEL_WIDTH_IN,
+    heightIn: DEFAULT_LABEL_HEIGHT_IN,
+    source:   'default',
+  };
+}
+
+// Friendly label for the Printer Info card's Label row. Renders "3 × 2 in"
+// regardless of the `printers[]` entry's labelUnits — page state is always
+// inches internally — but appends "(config.json)" or "(default)" so the
+// operator can verify their config entry was matched.
+function formatLabelDimensions(dims) {
+  const w = +dims.widthIn.toFixed(3).replace(/\.?0+$/, '');
+  const h = +dims.heightIn.toFixed(3).replace(/\.?0+$/, '');
+  const tag = dims.source === 'config' ? 'config.json' : 'default';
+  return `${w} × ${h} in (${tag})`;
+}
 
 async function loadConfig() {
   let raw;
@@ -1463,6 +1550,71 @@ async function loadConfig() {
     // know which helper will answer.
     log('Config: no featureKey set in app/config.json. PDF→ZPL prints through ' +
         'Zebra Browser Print will fail (license check); the shim ignores it. See README §4a.');
+  }
+  // `printers` is a unified array — one entry per known printer. Network
+  // entries (`host` set) double as shim registrations; non-network entries
+  // (`uid` set) are pure page-side metadata: friendly name override and
+  // label dimensions. Bad entries warn + skip; the rest of the config
+  // still loads.
+  if (Array.isArray(cfg.printers)) {
+    cfg.printers.forEach((entry, i) => {
+      const where = `printers[${i}]`;
+      if (!entry || typeof entry !== 'object') {
+        log(`Config: ${where} is not an object; skipping.`, 'warn');
+        return;
+      }
+      let key;
+      if (typeof entry.host === 'string' && entry.host.trim()) {
+        const port = Number.isInteger(entry.port) && entry.port > 0 && entry.port < 65536
+          ? entry.port : 9100;
+        key = `net:${entry.host.trim()}:${port}`;
+      } else if (typeof entry.uid === 'string' && entry.uid.trim()) {
+        key = entry.uid.trim();
+      } else {
+        log(`Config: ${where} has neither host nor uid — can't tell which printer ` +
+            'this entry refers to; skipping.', 'warn');
+        return;
+      }
+      // Validate label dimensions. Either both or neither — a half-set is
+      // ambiguous. Bad values warn but don't take down the whole entry
+      // (the name override may still be useful).
+      let widthIn, heightIn;
+      const hasW = 'labelWidth'  in entry;
+      const hasH = 'labelHeight' in entry;
+      if (hasW || hasH) {
+        if (hasW !== hasH) {
+          log(`Config: ${where} has only one of labelWidth/labelHeight; ` +
+              'both must be set together. Ignoring label dimensions for this entry.', 'warn');
+        } else {
+          const w = Number(entry.labelWidth);
+          const h = Number(entry.labelHeight);
+          if (!Number.isFinite(w) || w <= 0 || !Number.isFinite(h) || h <= 0) {
+            log(`Config: ${where} has invalid labelWidth/labelHeight ` +
+                `(${entry.labelWidth}/${entry.labelHeight}); using defaults for that printer.`, 'warn');
+          } else {
+            const units = entry.labelUnits == null || entry.labelUnits === 'in' ? 'in'
+                        : entry.labelUnits === 'mm' ? 'mm'
+                        : null;
+            if (units === null) {
+              log(`Config: ${where} has unknown labelUnits=${JSON.stringify(entry.labelUnits)} ` +
+                  '(must be "in" or "mm"); ignoring label dimensions for that printer.', 'warn');
+            } else {
+              widthIn  = units === 'mm' ? w / 25.4 : w;
+              heightIn = units === 'mm' ? h / 25.4 : h;
+            }
+          }
+        }
+      }
+      const name = (typeof entry.name === 'string' && entry.name.trim())
+        ? entry.name.trim() : undefined;
+      printerConfig.set(key, { name, widthIn, heightIn });
+    });
+    if (printerConfig.size) {
+      log(`Config: loaded ${printerConfig.size} printer entr` +
+          `${printerConfig.size === 1 ? 'y' : 'ies'}.`);
+    }
+  } else if ('printers' in cfg) {
+    log(`Config: 'printers' must be an array; got ${typeof cfg.printers}. Ignoring.`, 'warn');
   }
 }
 

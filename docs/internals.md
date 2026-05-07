@@ -334,13 +334,19 @@ conversion via Ghostscript, no Zebra license required.
 
 **`loadConfig()` at startup**: `fetch('config.json')` from the same
 origin (i.e. `app/config.json`, gitignored). The page reads
-`featureKey` and `shimPort`; the shim reads the same file via
-filesystem for `shimPort` and `networkPrinters`. If `featureKey` is
-present and non-empty, the value populates the module-level variable
-and both print paths spread it into the SDK options. If absent /
-empty / network-failure, `featureKey` stays empty and both call sites
-suppress the option entirely (so the SDK sees no `featureKey` at all
-rather than an empty string).
+`featureKey`, `shimPort`/`shimHttpsPort`, and the per-printer overrides
+under `printers[]`; the shim reads the same file via filesystem for
+`shimPort`/`shimHttpsPort` and the `printers` entries that have a
+`host` field (network registrations). If `featureKey` is present and
+non-empty, the value populates the module-level variable and both PDF
+print paths wrap it as `{ keys: { pdf: featureKey } }` in the SDK
+options. If absent / empty / network-failure, `featureKey` stays empty
+and both call sites suppress the option entirely (so the SDK sees no
+`keys` at all rather than an empty wrapper). Per-printer entries
+populate a `Map<uid, {name?, widthIn?, heightIn?}>` queried by
+`labelDimensionsForUid()` (drives `defaultZpl`'s `^PW`/`^LL` and
+`fitToFromZplTextarea`'s fallback) and by the dropdown rendering
+(`name` override).
 
 The repo deliberately does **not** ship a key. For prototyping, Zebra
 publishes a public demo key at
@@ -534,8 +540,8 @@ to Zebra ones — the lowercased concatenation of service name + TXT records
 must contain "zebra" or the entry is dropped. `--all-mdns-printers` disables
 this; explicit `--network` / `app/config.json` registrations bypass it.
 Discovered devices are deduped against any already-registered `(host, port)`
-pairs from `--network` CLI args or `app/config.json` (`networkPrinters`
-array); explicit registrations
+pairs from `--network` CLI args or `app/config.json` (entries under
+`printers[]` that have a `host` field); explicit registrations
 win on collision so users can override an auto-discovered display name. Any
 failure (missing `avahi-browse`, timeout, parse error) is swallowed — the
 function returns an empty list rather than raising.
