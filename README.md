@@ -203,12 +203,12 @@ file at `app/feature-key.txt` (gitignored, loaded by the page at
 startup). There is no UI input; it's deployment config, not per-session
 state.
 
-**Where to obtain a key.** Zebra publishes a public demo key in
-plaintext on its own test harness for prototyping. The forum thread at
-<https://developer.zebra.com/forum/25874> directs developers to it.
-View source on
+**Where to obtain a key.** Zebra publishes a public demo key for
+prototyping at <https://developer.zebra.com/content/browser-print-pdf>.
+The same key also appears in plaintext in Zebra's public test harness
+— view-source on
 <https://cagdemo.com/BrowserPrint/test/external/zebra_test.html> and
-search for `featureKey` to find the value. For production rollouts,
+look for the `feature_keys` JS variable. For production rollouts,
 obtain a per-machine or per-fleet key directly from Zebra rather than
 depending on the demo key (Zebra can rotate or revoke it).
 

@@ -341,12 +341,12 @@ empty and both call sites suppress the option entirely (so the SDK
 sees no `featureKey` at all rather than an empty string).
 
 The repo deliberately does **not** ship a key. For prototyping, Zebra
-publishes a public demo key in plaintext on its own test harness; the
-forum thread at <https://developer.zebra.com/forum/25874> points
-developers at it, and the value can be extracted by viewing source on
-<https://cagdemo.com/BrowserPrint/test/external/zebra_test.html>. We
-document the location in README §4a rather than committing a copy.
-Two reasons:
+publishes a public demo key at
+<https://developer.zebra.com/content/browser-print-pdf>; the same value
+also appears in plaintext in Zebra's public test harness (view-source
+on <https://cagdemo.com/BrowserPrint/test/external/zebra_test.html>,
+JS variable `feature_keys`). We document the location in README §4a
+rather than committing a copy. Two reasons:
 
 1. Avoid any appearance of distributing licensed material from this
    repo, even though the demo key is genuinely public.
