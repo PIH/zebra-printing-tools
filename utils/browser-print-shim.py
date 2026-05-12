@@ -1015,6 +1015,14 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(200, '')
 
     def handle_write(self):
+        # Two body shapes:
+        #   - application/json (Browser Print SDK's Device.send: text/byte-list data)
+        #   - multipart/form-data (Device.sendFile: raw blob, used for PDF Direct)
+        # Branch on Content-Type. The multipart parser is the same one used
+        # by /convert (see _parse_multipart) — binary fidelity already tested.
+        ct = self.headers.get('Content-Type', '')
+        if 'multipart/form-data' in ct.lower():
+            return self._handle_write_multipart(ct)
         body = self._read_json()
         device = registry.find(body.get('device') or {})
         if device is None:
@@ -1034,6 +1042,39 @@ class Handler(BaseHTTPRequestHandler):
                      device.name, len(data_bytes), dt_ms)
         except Exception as e:
             log.exception('write failed')
+            return self._send(500, f'write failed: {e}')
+        return self._send(200, '')
+
+    def _handle_write_multipart(self, ct):
+        body = self._read_body()
+        try:
+            parts = _parse_multipart(ct, body)
+        except Exception as e:
+            return self._send(400, f'Could not parse multipart: {e}')
+        json_part = parts.get('json')
+        blob_part = parts.get('blob')
+        if json_part is None:
+            return self._send(400, "Multipart /write requires a 'json' part")
+        if blob_part is None:
+            return self._send(400, "Multipart /write requires a 'blob' part")
+        try:
+            # _parse_multipart returns (filename, content_type, content_bytes).
+            # [2] = bytes.
+            meta = json.loads(json_part[2].decode('utf-8'))
+        except Exception as e:
+            return self._send(400, f"Bad 'json' part: {e}")
+        device = registry.find(meta.get('device') or {})
+        if device is None:
+            return self._send(404, 'Unknown device (uid not in registry)')
+        data_bytes = blob_part[2]
+        try:
+            t0 = time.monotonic()
+            device.write(data_bytes)
+            dt_ms = (time.monotonic() - t0) * 1000.0
+            log.info('write[multipart] → %s : %d bytes in %.0f ms',
+                     device.name, len(data_bytes), dt_ms)
+        except Exception as e:
+            log.exception('write[multipart] failed')
             return self._send(500, f'write failed: {e}')
         return self._send(200, '')
 

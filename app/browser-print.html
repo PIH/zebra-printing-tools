@@ -96,6 +96,9 @@
     <div><span class="info-label">Firmware</span>  <span class="info-value" id="info-firmware">—</span></div>
     <div><span class="info-label">Link-OS</span>   <span class="info-value" id="info-linkos">—</span></div>
     <div><span class="info-label">Resolution</span><span class="info-value" id="info-dpi">—</span></div>
+    <div title="Firmware-level PDF rasterization. Toggle via the Diagnostics presets, then Refresh.">
+      <span class="info-label">PDF Direct</span><span class="info-value" id="info-pdf-direct">—</span>
+    </div>
     <div><span class="info-label">Label</span>     <span class="info-value" id="info-label">—</span></div>
     <div><span class="info-label">Connection</span><span class="info-value" id="info-connection">—</span></div>
     <div><span class="info-label">UID</span>       <span class="info-value" id="info-uid">—</span></div>
@@ -141,9 +144,16 @@
   </div>
   <div class="row" style="margin-top: 0.5em">
     <button id="printPdf" disabled>Print this PDF →</button>
+    <button id="printPdfDirect" disabled title="Send raw PDF bytes to the printer firmware (apl.enable=pdf)">Print this PDF (PDF Direct) →</button>
     <a id="downloadPdf" download="label.pdf" style="margin-left: 0.5em; pointer-events: none; opacity: 0.45">⬇ Download</a>
     <span id="pdfStatus" class="muted"></span>
   </div>
+  <p class="muted" style="font-size: 0.9em; margin-top: 0.4em">
+    <b>Print this PDF</b> uses the helper's PDF→ZPL conversion (licensed; needs
+    <code>featureKey</code> on Win/Mac). <b>PDF Direct</b> sends raw PDF bytes
+    to the printer firmware — no helper conversion, no featureKey — but
+    requires <code>apl.enable = pdf</code> on the printer (see Printer Info above).
+  </p>
 </section>
 
 
@@ -162,8 +172,14 @@
   </div>
   <div class="row" style="margin-top: 0.5em">
     <button id="printCustomPdf" disabled>Print uploaded PDF →</button>
+    <button id="printCustomPdfDirect" disabled title="Send raw PDF bytes to the printer firmware (apl.enable=pdf)">Print uploaded PDF (PDF Direct) →</button>
     <span id="customPdfStatus" class="muted"></span>
   </div>
+  <p class="muted" style="font-size: 0.9em; margin-top: 0.4em">
+    PDF Direct bypasses the helper's PDF→ZPL conversion and the
+    <code>featureKey</code> license check; requires <code>apl.enable = pdf</code>
+    on the printer (see Printer Info above).
+  </p>
 </section>
 
 <!-- ============================================================ Diagnostics -->
@@ -195,6 +211,14 @@
             data-label="~JC (calibrate)">Calibrate sensor <code>~JC</code></button>
     <button class="diag" disabled data-mode="write" data-cmd="~JR"
             data-label="~JR (reset)">Reset printer <code>~JR</code></button>
+    <button class="diag" disabled data-mode="write"
+            data-cmd='! U1 setvar &quot;apl.enable&quot; &quot;pdf&quot;&#13;&#10;'
+            data-label='setvar apl.enable=pdf'
+            title="Enable PDF Direct (firmware-side PDF rasterization). Click Refresh after to see the new state in the Printer Info card.">Enable PDF Direct</button>
+    <button class="diag" disabled data-mode="write"
+            data-cmd='! U1 setvar &quot;apl.enable&quot; &quot;none&quot;&#13;&#10;'
+            data-label='setvar apl.enable=none'
+            title="Disable PDF Direct. Click Refresh after to see the new state. Some firmware needs a printer reset (~JR) for the change to take effect.">Disable PDF Direct</button>
   </div>
   <h3>Custom command</h3>
   <textarea id="rawCmd" rows="3"
@@ -453,9 +477,16 @@ function selectDevice(d) {
   const enabled = !!device;
   $('printZpl').disabled    = !enabled;
   $('generatePdf').disabled = !(enabled && pdfPreviewSupported);
-  // The PDF-upload Print button is also gated on a file having been picked;
+  // The PDF-upload Print buttons are also gated on a file having been picked;
   // re-evaluated by the file-input change handler when a file is chosen.
-  $('printCustomPdf').disabled = !(enabled && $('customPdfFile').files.length > 0);
+  $('printCustomPdf').disabled       = !(enabled && $('customPdfFile').files.length > 0);
+  $('printCustomPdfDirect').disabled = !(enabled && $('customPdfFile').files.length > 0);
+  // PDF Direct button for the Generated PDF: enabled iff a PDF has been
+  // rendered. Independent of pdfPreviewSupported (which gates the
+  // 'Generate PDF' step that PRODUCES lastPdfBytes — once we have bytes,
+  // they're sendable to the printer regardless of whether the shim is
+  // available to re-render). And independent of featureKey.
+  $('printPdfDirect').disabled = !(enabled && !!lastPdfBytes);
   // setDiagEnabled toggles #refreshPrinter, the diag preset buttons, and
   // the custom-command Send / Send+Read buttons together.
   setDiagEnabled(enabled);
@@ -709,14 +740,14 @@ function parseDensity(s) {
 //     Zebra.Printer constructor kicks off (configTimeout) plus refreshStatus,
 //     adding ~500–800 ms of queue contention before our request can dispatch.
 //  3. Zebra's official Browser Print helper on Windows is consistently slow
-//     per read — ~1500 ms even for small queries. Detection's three queries
-//     (head.resolution.in_dpi, getConfiguration, getInfo) serialise on the
-//     SDK's per-Printer queue, so the third query starts ~3 s in. With the
+//     per read — ~1500 ms even for small queries. Detection's four queries
+//     (head.resolution.in_dpi, getConfiguration, getInfo, apl.enable) serialise on the
+//     SDK's per-Printer queue, so the fourth query starts ~4.5 s in. With the
 //     old 5 s timeout the third query had ~2 s of headroom — easy to bust
 //     when Windows latency spiked, which manifested as `info.firmware` not
 //     populating in the printer-info card. 12 s is plenty.
 //
-// All three timeouts are wall-clock from when withDetectTimeout was called
+// All four timeouts are wall-clock from when withDetectTimeout was called
 // (not from when the SDK actually dispatches), so the budget has to cover
 // the worst-case sum of (queue wait + helper read latency).
 //
@@ -735,15 +766,17 @@ async function withDetectTimeout(fn, label) {
 async function detectPrinterCapabilities() {
   if (!zebra) return;
 
-  // Fire three queries in parallel; they serialise on the SDK queue but the
+  // Fire four queries in parallel; they serialise on the SDK queue but the
   // wall-clock cost is one queue traversal regardless of how many we ask for.
   //   - head.resolution.in_dpi SGD          : Link-OS 4+ canonical dpi answer
   //   - ^XA^HH^XZ config                    : printWidth, labelLength, RESOLUTION
   //   - ~hi info                            : model string (e.g. "ZTC GX430t-300dpi")
-  const [primaryDpiRes, cfgRes, infoRes] = await Promise.allSettled([
+  //   - apl.enable SGD                      : "pdf" → PDF Direct enabled in firmware
+  const [primaryDpiRes, cfgRes, infoRes, aplRes] = await Promise.allSettled([
     withDetectTimeout(() => zebra.getSGD('head.resolution.in_dpi'), 'getSGD(head.resolution.in_dpi)'),
     withDetectTimeout(() => zebra.getConfiguration(),               'getConfiguration'),
     withDetectTimeout(() => zebra.getInfo(),                        'getInfo'),
+    withDetectTimeout(() => zebra.getSGD('apl.enable'),             'getSGD(apl.enable)'),
   ]);
 
   const detected = [];
@@ -855,12 +888,32 @@ async function detectPrinterCapabilities() {
   // `lastDetected.dpi || <fallback>`, and the widthDots/heightDots
   // fallbacks below also coalesce.
   const fallbackDpi = densityDpi || 300;
+  // apl.enable SGD: 'pdf' = PDF Direct enabled; 'none' / 'zpl' / etc. = disabled.
+  // Older firmware may 404 the SGD or return empty — surface as null
+  // (info-card row shows '—'); never blocks PDF Direct buttons per spec §6.
+  let aplEnable = null;
+  if (aplRes.status === 'fulfilled') {
+    const v = parseSgdValue(aplRes.value);   // strips STX/ETX + quotes
+    if (v) {
+      // Normalise: parseSgdValue already trims internally, but some firmwares
+      // return e.g. "PDF" or " pdf " — lowercase + trim is canonical here.
+      aplEnable = v.trim().toLowerCase();
+      log(`Detect: apl.enable = ${JSON.stringify(aplEnable)}` +
+          (aplEnable === 'pdf' ? '  (PDF Direct enabled)' : '  (PDF Direct disabled)'));
+    } else {
+      log(`Detect: apl.enable returned ${JSON.stringify(aplRes.value)} (empty / unsupported SGD)`, 'warn');
+    }
+  } else {
+    log('Detect: apl.enable failed: ' + (aplRes.reason && aplRes.reason.message || aplRes.reason), 'warn');
+  }
+
   lastDetected = {
     dpi:        densityDpi,
     dpm:        densityDpm,
     widthDots:  detectedWidthDots  || Math.round(3.0 * fallbackDpi),
     heightDots: detectedHeightDots || Math.round(2.0 * fallbackDpi),
     model:      (infoRes.status === 'fulfilled' && infoRes.value) ? infoRes.value.model : null,
+    aplEnable:  aplEnable,
   };
 
   // Push everything we learned into the elevated info panel. Resolution
@@ -898,9 +951,12 @@ async function detectPrinterCapabilities() {
 // detection fails. The placeholder is honest about what's known.
 
 const INFO_FIELDS = ['info-model', 'info-firmware', 'info-linkos',
-                     'info-dpi', 'info-label', 'info-connection', 'info-uid'];
+                     'info-dpi', 'info-pdf-direct',
+                     'info-label', 'info-connection', 'info-uid'];
 
-const QUERYING_FIELDS = ['info-model', 'info-firmware', 'info-linkos', 'info-dpi'];
+// PDF Direct is query-dependent (apl.enable SGD) just like model/firmware/dpi.
+const QUERYING_FIELDS = ['info-model', 'info-firmware', 'info-linkos',
+                         'info-dpi', 'info-pdf-direct'];
 
 const setInfoField = (id, text, loading = false) =>
   setText(id, text, loading ? 'info-value muted' : 'info-value');
@@ -909,7 +965,7 @@ function clearPrinterInfo() {
   INFO_FIELDS.forEach(id => setInfoField(id, '—'));
 }
 
-// Mark the four query-dependent fields as in-flight. Connection, UID,
+// Mark the five query-dependent fields as in-flight. Connection, UID,
 // and Label are populated separately by the caller from synchronous
 // data (device handle + config lookup), so they're not touched here.
 function setPrinterInfoLoading() {
@@ -922,7 +978,7 @@ function updatePrinterInfo({ device, info, config } = {}) {
     setInfoField('info-uid',        device.uid || '?');
     setInfoField('info-label',      formatLabelDimensions(labelDimensionsForUid(device.uid)));
   }
-  // Each of the four query-dependent fields renders the real value if
+  // Each of the five query-dependent fields renders the real value if
   // detection returned one, or "—" if it didn't. No fallback to
   // device.name for model — see comment block above.
   setInfoField('info-model',    (info && info.model) ? info.model : '—');
@@ -933,6 +989,27 @@ function updatePrinterInfo({ device, info, config } = {}) {
     (config && config.linkOSVersion && config.linkOSVersion !== '0')
       ? config.linkOSVersion : '—');
   updateInfoResolution();
+  updateInfoPdfDirect();
+}
+
+// Renders the PDF Direct row. Source: lastDetected.aplEnable (the
+// apl.enable SGD value, lowercased). 'pdf' = firmware will rasterize
+// PDF blobs sent via device.sendFile. Anything else means PDF Direct
+// is off — the buttons stay enabled (this is a testing tool) but the
+// user can see the firmware state ahead of clicking.
+function updateInfoPdfDirect() {
+  // aplEnable is set only when parseSgdValue returned a non-empty value;
+  // null = detection failed or SGD unsupported, and that's the '—' case.
+  const v = lastDetected && lastDetected.aplEnable;
+  if (!v) {
+    setInfoField('info-pdf-direct', '—');
+    return;
+  }
+  if (v === 'pdf') {
+    setInfoField('info-pdf-direct', 'enabled (pdf)');
+  } else {
+    setInfoField('info-pdf-direct', `disabled (${v})`);
+  }
 }
 
 // Renders the Resolution row of the printer info card.
@@ -1115,7 +1192,8 @@ function clearPdf() {
   if (lastPdfUrl) { URL.revokeObjectURL(lastPdfUrl); lastPdfUrl = null; }
   lastPdfBytes = null;
   $('pdfPreview').src = 'about:blank';
-  $('printPdf').disabled = true;
+  $('printPdf').disabled       = true;
+  $('printPdfDirect').disabled = true;
   const dl = $('downloadPdf');
   dl.removeAttribute('href');
   dl.style.pointerEvents = 'none';
@@ -1132,7 +1210,8 @@ function showPdf(bytes) {
   dl.href = lastPdfUrl;
   dl.style.pointerEvents = '';
   dl.style.opacity = '';
-  $('printPdf').disabled = !device;
+  $('printPdf').disabled       = !device;
+  $('printPdfDirect').disabled = !device;
   setPdfMessage(null);
 }
 
@@ -1216,10 +1295,12 @@ $('customPdfFile').addEventListener('change', () => {
   if (file) {
     setText('customPdfInfo',
       `${file.name} · ${file.size.toLocaleString()} bytes`);
-    $('printCustomPdf').disabled = !device;
+    $('printCustomPdf').disabled       = !device;
+    $('printCustomPdfDirect').disabled = !device;
   } else {
     setText('customPdfInfo', '');
-    $('printCustomPdf').disabled = true;
+    $('printCustomPdf').disabled       = true;
+    $('printCustomPdfDirect').disabled = true;
   }
   setText('customPdfStatus', '');
 });
@@ -1266,6 +1347,10 @@ $('printCustomPdf').addEventListener('click', async () => {
   //     printer's reported config — `printWidth` is print-HEAD width
   //     (often wider than loaded media on ZD-series), and the
   //     textarea reflects what the user actually wants printed.
+  $('printCustomPdf').disabled       = true;
+  // Disable the sibling PDF Direct button too — same file, same printer:
+  // double-firing concurrent prints from one upload makes no sense.
+  $('printCustomPdfDirect').disabled = true;
   const fitTo = fitToFromZplTextarea();
   setText('customPdfStatus', `Sending ${file.name} (scale-to-fit ${fitTo.width}×${fitTo.height} dots)…`);
   const t0 = performance.now();
@@ -1287,6 +1372,31 @@ $('printCustomPdf').addEventListener('click', async () => {
         (msg.toLowerCase().includes('license') || msg.toLowerCase().includes('key')
           ? '  ← typically means the PDF feature key is missing or invalid'
           : ''), 'err');
+  } finally {
+    $('printCustomPdf').disabled       = !device || $('customPdfFile').files.length === 0;
+    $('printCustomPdfDirect').disabled = !device || $('customPdfFile').files.length === 0;
+  }
+});
+
+$('printCustomPdfDirect').addEventListener('click', async () => {
+  const file = $('customPdfFile').files[0];
+  if (!file || !device) return;
+  $('printCustomPdfDirect').disabled = true;
+  setText('customPdfStatus', 'Sending (PDF Direct)…');
+  const apl = (lastDetected && lastDetected.aplEnable) || 'unknown';
+  log(`pdf-direct (upload): apl.enable=${apl}, ${file.name}, ${file.size} bytes`);
+  try {
+    const t0 = performance.now();
+    await device.sendFile(file);   // File extends Blob; pass through.
+    const dt = (performance.now() - t0) | 0;
+    setText('customPdfStatus', `Sent ${file.size} bytes (PDF Direct, ${dt} ms)`);
+    log(`pdf-direct: ${file.name} → ${file.size} bytes in ${dt} ms`);
+    setTimeout(refreshStatus, 350);
+  } catch (e) {
+    setText('customPdfStatus', `PDF Direct failed: ${e}`, 'err');
+    log(`pdf-direct (${file.name}) failed: ${e}`, 'err');
+  } finally {
+    $('printCustomPdfDirect').disabled = !device || $('customPdfFile').files.length === 0;
   }
 });
 
@@ -1324,7 +1434,8 @@ $('resetZpl').addEventListener('click', (ev) => {
 
 $('printPdf').addEventListener('click', async () => {
   if (!device || !lastPdfBytes) return;
-  $('printPdf').disabled = true;
+  $('printPdf').disabled       = true;
+  $('printPdfDirect').disabled = true;
   setText('pdfStatus', 'Sending…');
   log(`print pdf: featureKey ${featureKey ? `present (${featureKey.length} chars)` : 'NOT SET'}, ${lastPdfBytes.length} bytes`);
   try {
@@ -1351,7 +1462,45 @@ $('printPdf').addEventListener('click', async () => {
     setText('pdfStatus', `Failed: ${e}${hint}`, 'err');
     log(`print pdf failed: ${e}`, 'err');
   } finally {
-    $('printPdf').disabled = !device || !lastPdfBytes;
+    $('printPdf').disabled       = !device || !lastPdfBytes;
+    $('printPdfDirect').disabled = !device || !lastPdfBytes;
+  }
+});
+
+// =============================================================================
+// PDF Direct — send raw PDF bytes to the printer firmware
+// =============================================================================
+// Bypasses the helper's PDF→ZPL conversion entirely. The printer
+// firmware rasterizes the PDF on-device if apl.enable = "pdf" is set.
+// No featureKey required (that's a license check on the helper's
+// converter, which this path doesn't use).
+//
+// What we cannot detect from the wire: on a printer with apl.enable
+// != "pdf", the helper still returns 200 — it just forwarded bytes to
+// the printer. The printer then either jams or prints PDF mojibake.
+// The Printer Info card's "PDF Direct" row warns the user pre-click;
+// the page log records the detected apl.enable value alongside every
+// send so post-mortems are visible.
+
+$('printPdfDirect').addEventListener('click', async () => {
+  if (!device || !lastPdfBytes) return;
+  $('printPdfDirect').disabled = true;
+  setText('pdfStatus', 'Sending (PDF Direct)…');
+  const apl = (lastDetected && lastDetected.aplEnable) || 'unknown';
+  log(`pdf-direct (generated): apl.enable=${apl}, ${lastPdfBytes.length} bytes`);
+  try {
+    const blob = new Blob([lastPdfBytes], { type: 'application/pdf' });
+    const t0 = performance.now();
+    await device.sendFile(blob);
+    const dt = (performance.now() - t0) | 0;
+    setText('pdfStatus', `Sent ${lastPdfBytes.length} bytes (PDF Direct, ${dt} ms)`);
+    log(`pdf-direct: ${lastPdfBytes.length} bytes in ${dt} ms`);
+    setTimeout(refreshStatus, 350);
+  } catch (e) {
+    setText('pdfStatus', `PDF Direct failed: ${e}`, 'err');
+    log(`pdf-direct failed: ${e}`, 'err');
+  } finally {
+    $('printPdfDirect').disabled = !device || !lastPdfBytes;
   }
 });
 

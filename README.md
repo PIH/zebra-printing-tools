@@ -51,6 +51,13 @@ skip-preview shortcut for arbitrary PDFs:
 | 2 | **Generate PDF + Print this PDF** | textarea | `POST /zpl-to-pdf` → bundled `zpl2pdf` → PDF preview; then on print, the helper's PDF→ZPL conversion — typically 6–25 KB compressed ZPL |
 | 3 | **Print uploaded PDF** (skip-preview shortcut) | file picker | helper's PDF→ZPL conversion only — typically 6–25 KB compressed ZPL |
 
+Each of the two PDF ops also has a **PDF Direct** variant ("Print this PDF
+(PDF Direct) →" and "Print uploaded PDF (PDF Direct) →") that bypasses
+helper conversion and sends the raw PDF bytes to the printer firmware
+via `device.sendFile`. Requires the printer to have PDF Direct enabled
+(`apl.enable = pdf`); the detected state is shown in the Printer Info
+card's PDF Direct row. See [internals §5](docs/internals.md#5-pdf-direct-as-alternative-architecture).
+
 On printer-select the page pre-fills the ZPL textarea with a default
 template whose `^PW` (print width) and `^LL` (label length) specify
 a 3"×2" demo label, sized to the detected DPI. Label dimensions are
@@ -262,7 +269,7 @@ We do not bundle a key. Zebra publishes a public demo key for prototyping at <ht
 
 The `featureKey` in `app/config.json` is just a bare string for ergonomics. The page wraps it into the canonical wire shape `{ keys: { pdf: "<key>" } }` before passing it to the SDK — that's what Zebra's helper actually looks for (`options.keys.<fromFormat>`), and a flat `featureKey` is silently dropped. The string `featureKey` does not appear anywhere in `BrowserPrint-3.1.250.min.js` or its Zebra extension; the SDK forwards your options object to the helper verbatim, so any shape mismatch only surfaces when the helper rejects with "licensing key... none was provided".
 
-For an even cleaner path on supported printers, see PDF Direct in [internals §5](docs/internals.md#5-pdf-direct-as-alternative-architecture) — firmware-side PDF rendering, no `featureKey` required at all.
+For an even cleaner path on supported printers, the page exercises **PDF Direct** via dedicated buttons in the Generated PDF and Upload PDF sections — firmware-side PDF rendering, no `featureKey` required. Requires the printer to have `apl.enable = pdf` set; the Printer Info card surfaces the detected state and the Diagnostics panel has presets to flip it. See [internals §5](docs/internals.md#5-pdf-direct-as-alternative-architecture).
 
 ##### `shimPort` / `shimHttpsPort`
 

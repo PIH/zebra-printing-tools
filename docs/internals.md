@@ -63,6 +63,11 @@ queue so concurrent ops don't interleave on the wire.
 - `device.sendAndRead(zpl, opts?)` → send + drain reply. `opts.until` exits
   on a terminator (e.g. `'\x03'` for ETX-framed status/info/config replies);
   no `until` falls back to drain-until-quiet.
+- `device.sendFile(blob)` → multipart `POST /write` with `{device}` JSON +
+  raw blob. Bypasses helper-side conversion entirely — the printer
+  firmware sees the bytes as-is. Used by the page's PDF Direct buttons
+  to send a PDF blob straight to a printer with `apl.enable = pdf`.
+  No `featureKey`, no options, no `fromFormat`.
 - `device.convertAndSendFile(blob, options?)` → multipart `POST /convert`
   with `{options, device}` JSON + blob; default action is `"print"`. PDF
   feature keys must be wrapped as `{ keys: { pdf: "<key>" } }` —
@@ -76,9 +81,9 @@ queue so concurrent ops don't interleave on the wire.
   - `printer.getSGD(name)` → unwrapped string value.
 
 For Zebra's own JSDoc (covering methods we deliberately didn't reimplement —
-`sendFile`, `printImageAsLabel`, `getConvertedResource`, `setSGD`,
-`setThenGetSGD`, the queue/Promise dual API, image-resize helpers, etc.)
-see [README §7](../README.md#zebras-documentation).
+`printImageAsLabel`, `getConvertedResource`, `setSGD`, `setThenGetSGD`, the
+queue/Promise dual API, image-resize helpers, etc.) see
+[README §7](../README.md#zebras-documentation).
 
 ---
 
@@ -193,7 +198,7 @@ race-prone; transient framing failures don't reach the user.
 
 ### 3b. Printer capability detection
 
-When the user selects a printer, the page also fires three queries in
+When the user selects a printer, the page also fires four queries in
 parallel through the SDK queue:
 
 | Query | Sent | Used for |
@@ -201,6 +206,7 @@ parallel through the SDK queue:
 | `getSGD('head.resolution.in_dpi')` | `! U1 getvar "head.resolution.in_dpi"\r\n` | dpi (Link-OS 4+ canonical) |
 | `getConfiguration()` | `^XA^HH^XZ` | `printWidth` (dots), `labelLength` (dots), `RESOLUTION` field, firmware |
 | `getInfo()`          | `~hi\r\n` | model string (e.g. `"GX430t-300dpi"`) |
+| `getSGD('apl.enable')` | `! U1 getvar "apl.enable"\r\n` | PDF Direct firmware state (`pdf` / `none` / etc.) |
 
 …then resolves density by escalating fallbacks. Density is tracked in
 both representations — `densityDpi` (dots-per-inch, snapped to standard
@@ -385,26 +391,45 @@ was consolidated into `app/config.json` — see entry 32.
 
 Modern Zebra Link-OS printers (the GX430t included, with current
 firmware) support **PDF Direct**: send a raw PDF to the printer over
-the wire and the firmware rasterizes it on the device. From Browser
-Print this is one call:
+the wire and the firmware rasterizes it on the device. From the
+page's MPL-2.0 client this is one call:
 
 ```js
-device.sendFile(pdfBlob, onSuccess, onError);
+device.sendFile(pdfBlob);
 ```
 
 No `getConvertedResource`, no helper-side conversion, no `featureKey`.
 The constraint is firmware-side: PDF Direct must be enabled in the
-printer's configuration (`! U1 setvar "apl.enable" "pdf"` via Zebra
-Setup Utilities, or the printer's web UI). Some older Link-OS firmware
-predates PDF Direct and won't accept this; check the printer's
-capabilities page before relying on it.
+printer's configuration via the `apl.enable` SGD (`! U1 setvar
+"apl.enable" "pdf"`). Some older Link-OS firmware predates PDF Direct
+and won't accept this.
 
-We have *not* exercised this pathway in the page — the GX430t in the
-dev environment hasn't had its firmware audited for PDF Direct
-support — but it's the cleanest production answer if the deployed
-fleet turns out to support it: no licensing entanglement, no
-per-machine keys, no helper-side conversion latency. Worth validating
-early in any PIH rollout. See §7.
+**Wire shape.** `sendFile` posts `multipart/form-data` to `POST /write`
+with two parts: a `json` part = `{"device": <deviceRecord>}` (no
+options, no action, no data field) and a `blob` part = the raw PDF
+bytes. Distinct from `convertAndSendFile`'s wire — same multipart
+shape but different endpoint and no `options` envelope. Both wire
+shapes are exercised by the lib's test suite (`lib/zebra-browser-print.test.mjs`).
+
+**Status:** the page now exercises this pathway in three places —
+
+| Where | What |
+|---|---|
+| Generated PDF section | `Print this PDF (PDF Direct) →` button — sends the zpl2pdf-rendered preview via `device.sendFile`. |
+| Upload PDF section    | `Print uploaded PDF (PDF Direct) →` button — sends a user-picked PDF file directly. |
+| Printer Info card     | New `PDF Direct` row showing the detected `apl.enable` value (`enabled (pdf)`, `disabled (<value>)`, or `—` if the SGD isn't supported). |
+| Diagnostics presets   | `Enable PDF Direct` / `Disable PDF Direct` buttons (write mode) that flip `apl.enable`. Click Refresh after to see the new state. Some firmware needs a `~JR` reset for the setvar to take effect. |
+
+The detection cycle (§3b) gained a fourth parallel query
+(`getSGD('apl.enable')`) alongside the three for dpi/config/info.
+
+The PDF Direct buttons stay enabled regardless of the detected value
+— this is the testing tool, not a guarded production primary path.
+What the page *cannot* detect: a printer with `apl.enable != "pdf"`
+that silently accepts the bytes and either jams or prints PDF
+mojibake — the helper still returns 200. The Printer Info card's
+value gives the user a pre-click signal; every PDF Direct send logs
+the detected value alongside the byte count for post-mortem.
 
 ---
 
@@ -470,6 +495,12 @@ Worth doing on the OpenMRS side eventually:
   printer's dpi, Floyd-Steinberg dithers the result to 1-bit, and the
   bitmap is emitted as a fully-compressed ZPL `^GFA` field. See "PDF
   conversion" below.
+- Pathway 3 — PDF Direct (`device.sendFile`): ✅ as raw byte transport.
+  The shim's `POST /write` accepts multipart/form-data in addition to its
+  JSON shape; the `blob` part is written to the device as-is. Whether the
+  bytes actually print depends on the printer's `apl.enable` setting,
+  which the shim does not interpret. Tested via the committed
+  `utils/test_browser_print_shim.py` suite.
 - Status reads (`Zebra.Printer.getStatus` → `~HS` → parsed): ✅. The kernel
   `usblp` device node is bidirectional, so the printer's response is
   readable. Network printers also keep the TCP socket open across
